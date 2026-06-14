@@ -8,10 +8,10 @@ import json
 import hashlib
 import re
 import random
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
-
 # Files to track for changes
 TRACKED_FILES = [
     "src/telegram_bot.py",
@@ -27,7 +27,7 @@ EXISTING_COMMANDS = [
     "start", "help", "lang", "switchlang", "reset", "block", "develop",
     "character", "dialogue", "prompt", "idea", "feedback", "style", "roast",
     "praise", "corrector", "editor", "count_me", "stats", "lobster", "pun",
-    "porko", "methodique", "methodichque", "cite", "cite_off", "cite_on",
+    "xyx", "methodique", "methodichque", "cite", "cite_off", "cite_on",
     "cite_when", "summary", "cry_baby", "dev_feedback", "done", "confo_enable37", "upload",
     # Internal functions that should NOT appear in changelog
     "get_writing_prompt", "generate_idea", "develop_idea", "character_help",
@@ -79,6 +79,68 @@ def save_hashes(data_dir: Path, hashes: Dict[str, str]) -> None:
         print(f"Failed to save hashes: {e}")
 
 
+def get_last_deploy_tag(project_root: Path) -> Optional[str]:
+    """Get the most recent deploy tag, or None if none exists."""
+    try:
+        result = subprocess.run(
+            ["git", "tag", "--list", "--sort=-creatordate", "deploy-*"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        tags = [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
+        return tags[0] if tags else None
+    except Exception:
+        return None
+
+
+def get_git_diff_files(project_root: Path, old_tag: Optional[str]) -> List[Tuple[str, str, str]]:
+    """
+    Get list of changed tracked files between old_tag and HEAD.
+    Returns list of (rel_path, old_hash, new_hash) for changed files.
+    If old_tag is None, treats all tracked files as changed.
+    """
+    changed = []
+    for rel_path in TRACKED_FILES:
+        file_path = project_root / rel_path
+        if not file_path.exists():
+            continue
+
+        current_hash = calculate_file_hash(file_path)
+
+        if old_tag is None:
+            changed.append((rel_path, "", current_hash))
+            continue
+
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", f"{old_tag}..HEAD", "--", rel_path],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if result.stdout.strip():
+                changed.append((rel_path, old_tag, current_hash))
+        except Exception:
+            pass
+
+    return changed
+
+
+def create_deploy_tag(project_root: Path) -> str:
+    """Create a new deploy tag and return it."""
+    tag_name = f"deploy-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
+    subprocess.run(
+        ["git", "tag", tag_name],
+        cwd=project_root,
+        capture_output=True,
+        check=True,
+    )
+    return tag_name
+
+
 def get_changed_files(project_root: Path, stored_hashes: Dict[str, str]) -> List[Tuple[str, str, str]]:
     """
     Compare current files with stored hashes.
@@ -93,7 +155,6 @@ def get_changed_files(project_root: Path, stored_hashes: Dict[str, str]) -> List
             if current_hash != old_hash:
                 changed.append((rel_path, old_hash, current_hash))
     return changed
-
 
 def extract_commands_from_code(content: str) -> List[str]:
     """Extract command names from code content."""
@@ -174,13 +235,14 @@ def generate_changelog_with_llm(writer_bot, changed_files: List[Tuple[str, str, 
     
     if lang == "ru":
         prompt = f"""Ты пишешь changelog для пользователей.
+Пиши ТОЛЬКО о том, что изменилось для ПОЛЬЗОВАТЕЛЯ (новые команды, исправления в ответах, новые темы, исправление багов).
+Игнорируй чисто техническую чепуху: структуру папок, импорты, мелкий рефакторинг.
 
 СТРОГИЕ ПРАВИЛА:
-1) Пиши ТОЛЬКО о реальных изменениях в коде - что именно починили или улучшили
-2) Если изменений мало → напиши ОДНО предложение или пропусти
-3) НИКОГДА не придумывай новые команды или фичи которых нет в коде!
-4) Не вымучивай пункты - максимум 2-3 если есть реальные изменения
-5) Фокусируйся на: исправленных багах, починенных командах, улучшенной логике работы
+1) Если есть исправления в логике команд (например, /pun теперь видит контекст, а /summary соблюдает формат) — ОБЯЗАТЕЛЬНО напиши об этом.
+2) Пиши максимально кратко: 1-3 пункта.
+3) НИКАКИХ "внутренних улучшений" и "оптимизаций".
+4) Не используй markdown (звездочки, жирный шрифт).
 
 УЖЕ СУЩЕСТВУЮЩИЕ: {known_cmds}...
 
@@ -188,42 +250,36 @@ def generate_changelog_with_llm(writer_bot, changed_files: List[Tuple[str, str, 
 
 {diff_content}
 
-Напиши changelog на русском. Будь конкретным - опиши что именно починили, но сохраняй лёгкий сарказм в духе "мы это сделали, и вроде работает"."""
+Напиши changelog на русском. Будь конкретным и едким, как старый редактор."""
 
     else:
-        prompt = f"""You are a cynical PM with 20 years of experience writing release notes. Your style: sarcastic but informative. No fluff or technical jargon.
-
-ANALYZE THE CODE and identify what changed for USERS:
-- New commands (cmd_* functions) — what the command does in simple words
-- Improvements to existing commands — what got better
-- Fixed bugs — what was broken and now works
-- New features — how this helps the user
+        prompt = f"""You are writing release notes for users.
+Write ONLY about changes that are VISIBLE to the user (new commands, fixed responses, new themes).
+Ignore technical fluff: .env loading, folder structure, refactoring, imports, etc.
 
 RULES:
-1. Write ONLY about REAL changes in the code below
-2. DO NOT invent commands or features that don't exist
-3. Write in plain language, like for a friend, not a programmer
-4. Maximum 5 items, significant changes only
-5. Format: "- Brief name: what changed and why it matters to users"
-6. No repetitive "- What:" at the start, each item should be unique
+1. If there are no user-facing changes — return an empty string.
+2. Be extremely brief: 1-2 items max.
+3. NO "internal improvements" or "under the hood" talk.
+4. If a command was fixed (e.g., /pun) — say so: "Fixed /pun command, it now sees context correctly."
+5. No markdown formatting.
 
 Changed files:
 {diff_content}
 
-Write changelog in English. Be specific but keep a light sarcastic tone like "we did this thing and it sort of works"."""
+Write changelog in English. Be specific and cynical."""
 
     
     try:
         if writer_bot and writer_bot.client:
             response = writer_bot.client.chat.completions.create(
-                model=writer_bot.model,
-                messages=[
-                    {"role": "system", "content": "Ты пишешь краткие notes к релизам. Не придумывай. Будь честным. НЕ используй markdown (звёздочки, жирный шрифт)." if lang == "ru" else "You write brief release notes. Don't hallucinate. Be honest. NO markdown formatting (no asterisks, no bold)."},
+                model="gpt-4o-mini",
+                messages=[                    {"role": "system", "content": "Ты пишешь краткие notes к релизам. Не придумывай. Будь честным. НЕ используй markdown (звёздочки, жирный шрифт)." if lang == "ru" else "You write brief release notes. Don't hallucinate. Be honest. NO markdown formatting (no asterisks, no bold)."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,
+                temperature=0.2,
                 max_tokens=800
-            )
+            )            
             changelog = response.choices[0].message.content.strip()
             
             # Add witty comment if changelog is meaningful
@@ -275,43 +331,36 @@ def generate_user_friendly_fallback(analysis: Dict, lang: str = "ru") -> str:
     return "\n".join(lines)
 
 
-def check_and_generate_changelog(project_root: Path, writer_bot, admin_id: int, lang: str = "ru", should_save_hashes: bool = True) -> Optional[str]:
+def check_and_generate_changelog(project_root: Path, writer_bot, admin_id: int, lang: str = "ru", should_save_tag: bool = True) -> Optional[str]:
     """
     Main entry point: check for changes and generate changelog.
     Returns changelog text if changes detected, None otherwise.
-    
-    CRITICAL: Hashes are saved ONLY after successful notifications to prevent 
-    duplicate alerts on bot restarts. Use should_save_hashes=False when 
-    generating changelogs, then save hashes manually after notifications are sent.
-    
+
+    Uses git deploy tags to track changes between deployments.
+    Creates a new deploy-* tag after successful changelog generation.
+
     Args:
         project_root: Path to project root
         writer_bot: WriterBot instance for LLM calls
         admin_id: Admin user ID (for reference, not used in this function)
         lang: Language code (ru/en)
-        should_save_hashes: If True, saves hashes after generating changelog. 
-                           Set to False when testing or when you want to save hashes 
-                           manually after confirming notifications were sent.
+        should_save_tag: If True, creates a new deploy tag after generating changelog.
+                         Set to False when testing or when you want to create tag
+                         manually after confirming notifications were sent.
     """
 
     try:
-        data_dir = project_root / "data"
-        stored_hashes = load_stored_hashes(data_dir)
-        changed_files = get_changed_files(project_root, stored_hashes)
-        
+        old_tag = get_last_deploy_tag(project_root)
+        changed_files = get_git_diff_files(project_root, old_tag)
+
         if not changed_files:
             return None
-        
+
         changelog = generate_changelog_with_llm(writer_bot, changed_files, project_root, lang)
-        
-        if should_save_hashes:
-            current_hashes = {}
-            for rel_path in TRACKED_FILES:
-                file_path = project_root / rel_path
-                if file_path.exists():
-                    current_hashes[rel_path] = calculate_file_hash(file_path)
-            save_hashes(data_dir, current_hashes)
-        
+
+        if should_save_tag:
+            create_deploy_tag(project_root)
+
         return changelog
 
     except Exception as e:

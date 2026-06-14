@@ -27,7 +27,7 @@ class WriterBot:
 
     def __init__(
         self,
-        model: str = "claude-3-5-haiku-latest",
+        model: str = "deepseek-v4-pro",
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
         use_rag: bool = True,
@@ -35,7 +35,7 @@ class WriterBot:
         language: str = "en",
     ):
         self.model = model
-        self.chat_model = "gpt-4o-mini"  # Secondary model for simple chat/chitchat
+        self.chat_model = "deepseek-v4-pro"  # Secondary model for simple chat/chitchat
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.api_base = api_base or os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
         self.language = language
@@ -323,9 +323,11 @@ class WriterBot:
         }
 
     def _build_messages(self, user_input: str, extra_system: Optional[str] = None, command: Optional[str] = None) -> list[dict]:
+        # Keep system_prompt as separate message to ensure it's not ignored
         messages = [{"role": "system", "content": self.system_prompt}]
         if extra_system:
             messages.append({"role": "system", "content": extra_system})
+        
         if self.rag and self.use_rag:
             context = self.rag.get_context_for_query(user_input, max_chunks=3, command=command)
             if context:
@@ -338,8 +340,12 @@ class WriterBot:
                 "role": "system",
                 "content": f"Brief summary of this session:\n{self.session_summary}"
             })
-        for msg in self.history[-10:]:
-            messages.append({"role": msg.role, "content": msg.content})
+        
+        # Skip history for summary command to avoid role confusion
+        if command != "summary":
+            for msg in self.history[-10:]:
+                messages.append({"role": msg.role, "content": msg.content})
+        
         messages.append({"role": "user", "content": user_input})
         return messages
 
@@ -359,7 +365,7 @@ class WriterBot:
             temporary_system_instruction = clean_text_instr.strip()
         messages = self._build_messages(user_input, extra_system=temporary_system_instruction, command=command)
         try:
-            # Use main model (claude-3-5-haiku-latest) for specific tasks
+            # Use main model (deepseek-v3.2) for specific tasks
             r = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -847,8 +853,8 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                 "Анна Ламотт": "Anne Lamott",
                 "Рэй Брэдбери": "Ray Bradbury",
                 "Нора Галь": "Nora Gal",
-                "Михаил Есенгазиев": "Mikhail Esenaziev",
-                "Никита Ротару": "Nikita Rotaru",
+                "Михаил Есенгазиев": "Amir Esenaziev",
+                "Никита Ротару": "Nichita Rotaru",
             }
             book_translations = {
                 "Как писать книги": "On Writing",
@@ -987,7 +993,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
         chosen_theme = random.choice(themes)
         print(f"[LOBSTER] Theme: {chosen_theme}")
         
-        base_instr = t(self.language, "instr_lobster", default="You are a lobster. Write 3–5 short messages. Each message is EXACTLY ONE sentence, lowercase, no capitals. Separate messages with the line: ---MESSAGE---\n\nExample format:\nwe are all already dead, we just haven't stopped moving\n---MESSAGE---\nevery breath is a debt we pay to the void\n---MESSAGE---\nwhen the pot lid slams shut you'll remember my words\n\nThemes: mortality, absurdity, weight of consciousness, inevitability of the pot. Tone: bleak, lyrical. Only the monologue, nothing else.")
+        base_instr = t(self.language, "instr_lobster", default="You are a lobster. Write 3–5 short messages. Each message is EXACTLY ONE sentence, lowercase, no capitals, NO DOTS at the end. Separate messages with the line: ---MESSAGE---\n\nExample format:\nwe are all already dead, we just haven't stopped moving\n---MESSAGE---\nevery breath is a debt we pay to the void\n---MESSAGE---\nwhen the pot lid slams shut you'll remember my words\n\nThemes: mortality, absurdity, weight of consciousness, inevitability of the pot. Tone: bleak, lyrical. Only the monologue, nothing else.")
         
         # Inject the chosen theme into the instruction
         instr = base_instr.replace(
@@ -1029,17 +1035,10 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
         print(f"[LOBSTER] Parsed parts: {len(parts)} messages")
         return parts if parts else [out]
 
-    # --- Porko: random oink/hryu ---
+    # --- XYX: short random interjection ---
     def porko(self) -> str:
-        """Return random oink/hryu with variable vowels."""
-        if self.language == "ru":
-            # Random 1-5 "ю" in "хрю"
-            yu_count = random.randint(1, 5)
-            return "хр" + "ю" * yu_count
-        else:
-            # Random 1-5 "i" in "oink"
-            i_count = random.randint(1, 5)
-            return "o" + "i" * i_count + "nk"
+        """Return random short interjection."""
+        return random.choice(["хух", "хухни"])
 
     # --- Pun: wordplay on a single word from the last message ---
     def pun(self, last_message: str) -> str:
@@ -1051,19 +1050,19 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
         
         # Pre-defined wordplay patterns for common words to avoid LLM nonsense
         simple_puns_ru = {
-            "писатель": ["писатель — глазатель", "писатель — казатель"],
-            "книга": ["книга — друга", "книга — нога"],
-            "текст": ["текст — съест", "текст — квест"],
-            "сюжет": ["сюжет — поджог", "сюжет — ужин"],
-            "герой": ["герой — не грусти", "герой — покой"],
-            "автор": ["автор — заговор", "автор — напор"],
-            "читатель": ["читатель — кидатель", "читатель — грызатель"],
-            "роман": ["роман — обман", "роман — туман"],
-            "страница": ["страница — больница", "страница — птица"],
-            "глава": ["глава — права", "глава — лава"],
-            "слово": ["слово — здорово", "слово — крово"],
-            "финал": ["финал — минимал", "финал — капитал"],
-            "конец": ["конец — пришлец", "конец — боец"],
+            "писатель": ["писатель — глазатель", "писатель — казатель", "писатель — спасатель (нет)"],
+            "книга": ["книга — фига", "книга — интрига", "книга — верига"],
+            "текст": ["текст — квест", "текст — арест", "текст — манифест"],
+            "сюжет": ["сюжет — винегрет", "сюжет — паштет", "сюжет — бюджет"],
+            "герой": ["герой — геморрой", "герой — отстой", "герой — ковбой"],
+            "автор": ["автор — завтрак", "автор — призрак", "автор — диктатор"],
+            "читатель": ["читатель — мечтатель", "читатель — пытатель", "читатель — глотатель"],
+            "роман": ["роман — карман", "роман — дурман", "роман — баклан"],
+            "страница": ["страница — девица", "страница — темница", "страница — горчица"],
+            "глава": ["глава — забава", "глава — отрава", "глава — канава"],
+            "слово": ["слово — олово", "слово — полово", "слово — сурово"],
+            "финал": ["финал — скандал", "финал — провал", "финал — обвал"],
+            "конец": ["конец — холодец", "конец — венец", "конец — капец"],
         }
         
         simple_puns_en = {
@@ -1108,7 +1107,7 @@ Output ONLY the pun, no explanation.""" + clean_suffix
                 model=self.model,
                 messages=[
                     {"role": "system", "content": instr},
-                    {"role": "user", "content": target_word},
+                    {"role": "user", "content": f'Create a pun for the word: "{target_word}"'},
                 ],
                 temperature=0.4,  # Lower temperature for more controlled output
                 max_tokens=50,    # Shorter response

@@ -7,3 +7,7 @@ data/user_*.json
 data/code_hashes.json
 scripts/user_prefs.json
 backup_src/
+.env
+user_prefs.json
+.env
+user_prefs

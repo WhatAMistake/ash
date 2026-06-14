@@ -52,7 +52,7 @@ except ImportError:
 try:
     from aiogram import Bot, Dispatcher, types, F
     from aiogram.filters import Command
-    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
     from aiogram.utils.keyboard import ReplyKeyboardBuilder
     AIogram_AVAILABLE = True
 except ImportError:
@@ -91,7 +91,7 @@ class TelegramWriterBot:
     def __init__(
         self,
         telegram_token: str,
-        llm_model: str = "gpt-4o-mini",
+        llm_model: str = "deepseek-v4-pro",
         llm_api_key: Optional[str] = None,
         llm_api_base: Optional[str] = None,
         use_rag: bool = True,
@@ -409,8 +409,8 @@ class TelegramWriterBot:
         async def cmd_pun(message: types.Message):
             await self._handle_pun(message)
 
-        @self.dp.message(Command("porko"))
-        async def cmd_porko(message: types.Message):
+        @self.dp.message(Command("xyx"))
+        async def cmd_xyx(message: types.Message):
             await self._handle_porko(message)
 
         @self.dp.message(Command("methodique"))
@@ -951,13 +951,23 @@ class TelegramWriterBot:
     async def _handle_pun(self, message: types.Message):
         user_id = message.from_user.id
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
-        last = self.last_user_message.get(user_id, "").strip()
-        if not last or last.startswith("/"):
+        
+        # 1. Try reply message first
+        target_text = ""
+        if message.reply_to_message:
+            target_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
+        
+        # 2. Fallback to last stored message if no reply or reply is empty
+        if not target_text:
+            target_text = self.last_user_message.get(user_id, "").strip()
+            
+        # 3. Validate: must not be empty and not a command
+        if not target_text or target_text.startswith("/"):
             await message.answer(t(lang, "pun_no_message"))
             return
-        reply = self._get_writer_bot(user_id).pun(last)
+            
+        reply = self._get_writer_bot(user_id).pun(target_text)
         await message.answer(reply)
-
     async def _handle_porko(self, message: types.Message):
         user_id = message.from_user.id
         wb = self._get_writer_bot(user_id)
@@ -1348,14 +1358,15 @@ class TelegramWriterBot:
 
         response = wb.generate_response(
             full_text,
-            temporary_system_instruction=instr
+            temporary_system_instruction=instr,
+            command="summary"
         )
 
         # Transition to discussion mode for summary
         self.user_states[user_id] = "summary_discuss"
         # Keep accumulated_text for context in discussion
         
-        await message.answer(response + f"\n\n{t(lang, 'discuss_mode_hint')}", reply_markup=get_main_keyboard(lang), parse_mode=None)
+        await message.answer(response + f"\n\n{t(lang, 'discuss_mode_hint')}", parse_mode=None)
 
         return True
 
@@ -1613,13 +1624,16 @@ class TelegramWriterBot:
 
 
     async def _handle_message(self, message: types.Message):
-        if not (message.text or "").strip():
-            return
-
         user_id = message.from_user.id
         chat_id = message.chat.id
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
-        text = (message.text or "").strip()
+        text = (message.text or message.caption or "").strip()
+        
+        if text and not text.startswith("/"):
+            self.last_user_message[user_id] = text
+
+        if not text:
+            return
         
         # Get state FIRST
         state = self.user_states.get(user_id, "chat")
@@ -1685,9 +1699,12 @@ class TelegramWriterBot:
             self.group_chats.add(chat_id)  # Track for auto porko/lobster
 
         # Check if we should respond in group chat
-        # If waiting for input, always respond regardless of group rules
+        # In groups, respond only to commands/mentions/replies to bot.
+        # Waiting states should not bypass group rules (prevents auto-triggering in chats).
         should_respond, text = self._should_respond_in_group(message)
-        if not should_respond and not is_waiting_input:
+        if message.chat.type in ("group", "supergroup") and not should_respond:
+            return
+        if message.chat.type == "private" and not should_respond and not is_waiting_input:
             return
 
         # Skip commands (handled by command handlers)
@@ -1744,16 +1761,17 @@ class TelegramWriterBot:
             else:
                 return
             
-            await message.answer(reply, reply_markup=get_main_keyboard(lang))
+            await message.answer(reply)
             return
 
         if text:
-            self.last_user_message[user_id] = text
+            pass # Already updated at the beginning of _handle_message
         
-        # Fallback: if bot was "away" for more than 1 hour (bot inactive, not user)
+        # Fallback: if bot was "away" for more than 24 hours (bot inactive, not user)
         # Check BEFORE updating the timestamp
-        if self.bot_last_activity and (now - self.bot_last_activity).total_seconds() > 3600:
+        if self.bot_last_activity and (now - self.bot_last_activity).total_seconds() > 86400:
             await message.answer(t(lang, "bot_returned"))
+
         
         # Show pending changelog to admin only for confirmation
         if self.pending_changelog and user_id == ADMIN_ID:
@@ -1829,11 +1847,11 @@ class TelegramWriterBot:
             chunks = [response[i:i+4000] for i in range(0, len(response), 4000)]
             for idx, chunk in enumerate(chunks):
                 if idx == len(chunks) - 1:
-                    await message.answer(chunk, reply_markup=get_main_keyboard(lang))
+                    await message.answer(chunk)
                 else:
                     await message.answer(chunk)
         else:
-            await message.answer(response, reply_markup=get_main_keyboard(lang))
+            await message.answer(response)
 
 
     async def _handle_discussion(self, message: types.Message, text: str, state: str):
@@ -1892,7 +1910,7 @@ class TelegramWriterBot:
             self.user_states[user_id] = "chat"
             if user_id in self.accumulated_text:
                 del self.accumulated_text[user_id]
-            await message.answer(t(lang, "discuss_exit"), reply_markup=get_main_keyboard(lang))
+            await message.answer(t(lang, "discuss_exit"))
             return
         
         # Special handling for count_me - process even if text is short/empty
@@ -2006,7 +2024,7 @@ class TelegramWriterBot:
 
 
     async def _porko_lobster_background_loop(self):
-        """Background task: send porko (75%) or lobster (25%) randomly every 4-20 hours in group chats."""
+        """Background task: send xyx (75%) or lobster (25%) randomly every 4-20 hours in group chats."""
         while True:
             delay = random.randint(4, 20) * 3600
             await asyncio.sleep(delay)
@@ -2034,19 +2052,19 @@ class TelegramWriterBot:
                                     await self.bot.send_message(chat_id=chat_id, text=chunk)
                                     await asyncio.sleep(0.8)
                         else:
-                            await self.bot.send_message(chat_id=chat_id, text="хрю")
+                            await self.bot.send_message(chat_id=chat_id, text=self._get_writer_bot(0).porko())
                     
                     if not hasattr(self, 'last_porko_lobster'):
                         self.last_porko_lobster = {}
                     self.last_porko_lobster[chat_id] = datetime.now()
                 except Exception as e:
-                    print(f"Auto porko/lobster error: {e}")
+                    print(f"Auto xyx/lobster error: {e}")
 
 
 async def main():
     import argparse
     parser = argparse.ArgumentParser(description="Writer's Tears Telegram Bot")
-    parser.add_argument("--model", default="gpt-4o-mini", help="LLM model to use")
+    parser.add_argument("--model", default="deepseek-v4-pro", help="LLM model to use")
     parser.add_argument("--no-rag", action="store_true", help="Disable RAG")
     args = parser.parse_args()
 
