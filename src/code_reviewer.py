@@ -1,5 +1,5 @@
 """
-Code change reviewer for Writer's Tears bot.
+Code change reviewer for Ash bot.
 Tracks file hashes and generates changelogs on startup.
 """
 

@@ -1,5 +1,5 @@
 """
-Core logic for Writer's Tears.
+Core logic for Ash.
 """
 
 from .idea_generator import IdeaGenerator, StoryIdea

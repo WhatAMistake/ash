@@ -1,5 +1,5 @@
 """
-Telegram bot for Writer's Tears — writing coach.
+Telegram bot for Ash — writing coach.
 """
 
 import os
@@ -86,7 +86,7 @@ def get_main_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
 
 
 class TelegramWriterBot:
-    """Telegram front-end for Writer's Tears."""
+    """Telegram front-end for Ash."""
 
     def __init__(
         self,
@@ -2045,7 +2045,7 @@ class TelegramWriterBot:
 
 async def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Writer's Tears Telegram Bot")
+    parser = argparse.ArgumentParser(description="Ash Telegram Bot")
     parser.add_argument("--model", default="gpt-4o-mini", help="LLM model to use")
     parser.add_argument("--no-rag", action="store_true", help="Disable RAG")
     args = parser.parse_args()

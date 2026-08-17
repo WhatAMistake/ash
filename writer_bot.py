@@ -1,5 +1,5 @@
 """
-Writer's Tears — bot for writers: creative block, ideas, exercises, feedback.
+Ash — bot for writers: creative block, ideas, exercises, feedback.
 """
 
 import os
@@ -23,7 +23,7 @@ class Message:
 
 
 class WriterBot:
-    """Writer's Tears: writing coach with RAG over craft books."""
+    """Ash: writing coach with RAG over craft books."""
 
     def __init__(
         self,
@@ -66,7 +66,7 @@ class WriterBot:
         return self._default_prompt()
 
     def _default_prompt(self) -> str:
-        return """You are Writer's Tears — a writer with twenty years of experience. You help with creative block, plot and character development, dialogue, and style. You draw on craft advice from authors like Stephen King, Anne Lamott, Ray Bradbury, John Truby, Robert McKee. Be concise, concrete, and direct. No fluff, no empty motivation."""
+        return """You are Ash — a writer with twenty years of experience. You help with creative block, plot and character development, dialogue, and style. You draw on craft advice from authors like Stephen King, Anne Lamott, Ray Bradbury, John Truby, Robert McKee. Be concise, concrete, and direct. No fluff, no empty motivation."""
 
     # Context window limit: 128k tokens ≈ 512k characters (safe limit ~400k)
     MAX_CONTEXT_CHARS = 420000

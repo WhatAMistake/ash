@@ -1,5 +1,5 @@
 """
-Writer's Tears — bot for writers: creative block, ideas, exercises, feedback.
+Ash — bot for writers: creative block, ideas, exercises, feedback.
 """
 
 import os
@@ -23,7 +23,7 @@ class Message:
 
 
 class WriterBot:
-    """Writer's Tears: writing coach with RAG over craft books."""
+    """Ash: writing coach with RAG over craft books."""
 
     def __init__(
         self,
@@ -66,7 +66,7 @@ class WriterBot:
         return self._default_prompt()
 
     def _default_prompt(self) -> str:
-        return """You are Writer's Tears — a writer with twenty years of experience. You help with creative block, plot and character development, dialogue, and style. You draw on craft advice from authors like Stephen King, Anne Lamott, Ray Bradbury, John Truby, Robert McKee. Be concise, concrete, and direct. No fluff, no empty motivation."""
+        return """You are Ash — a writer with twenty years of experience. You help with creative block, plot and character development, dialogue, and style. You draw on craft advice from authors like Stephen King, Anne Lamott, Ray Bradbury, John Truby, Robert McKee. Be concise, concrete, and direct. No fluff, no empty motivation."""
 
     # Context window limit: 128k tokens ≈ 512k characters (safe limit ~400k)
     MAX_CONTEXT_CHARS = 420000
@@ -496,15 +496,18 @@ class WriterBot:
         )
         return self.generate_response(user_message, temporary_system_instruction=instr, command="dialogue")
 
-    def get_random_prompt(self) -> str:
-        # 80% chance to generate fresh, 20% to use pre-made
-        if random.random() < 0.8 and self.client:
-            return self.generate_fresh_prompt()
+    def _local_random_prompt(self) -> str:
         data = self._load_prompts_data()
         prompts = data.get("prompts", [])
         if not prompts:
             return self._default_prompts_data()["prompts"][0]
         return random.choice(prompts)
+
+    def get_random_prompt(self) -> str:
+        # 80% chance to generate fresh, 20% to use pre-made
+        if random.random() < 0.8 and self.client:
+            return self.generate_fresh_prompt()
+        return self._local_random_prompt()
 
     def get_random_exercise(self) -> dict:
         data = self._load_prompts_data()
@@ -583,7 +586,7 @@ class WriterBot:
                 default="Harsh, cynical, but objective critique. No mercy. Point out specific problems: what breaks, why it's bad, how to fix."
             )
         )
-        result = self.generate_response(text, temporary_system_instruction=instr)
+        result = self.generate_response(text, temporary_system_instruction=instr, command="roast")
         return result + truncation_msg if was_truncated else result
 
     def praise(self, text: str) -> str:
@@ -603,7 +606,7 @@ class WriterBot:
                 default="Specific praise. Show WHAT works and WHY. No vague compliments, only concrete analysis with examples."
             )
         )
-        result = self.generate_response(text, temporary_system_instruction=instr)
+        result = self.generate_response(text, temporary_system_instruction=instr, command="praise")
         return result + truncation_msg if was_truncated else result
 
     def reset(self):
@@ -616,6 +619,13 @@ class WriterBot:
     def correct_text(self, text: str) -> str:
         if not self.client:
             return "Error: LLM client not initialized."
+
+        text, was_truncated = self._truncate_for_context(text)
+        truncation_msg = (
+            f"\n\n[ВНИМАНИЕ: Текст обрезан до {self.MAX_CONTEXT_CHARS} символов из-за ограничения контекста.]"
+            if self.language == "ru"
+            else f"\n\n[NOTE: Text truncated to {self.MAX_CONTEXT_CHARS} chars due to context limit.]"
+        )
         
         if self.language == "ru":
             instr = """Ты — профессиональный корректор. Твоя задача — исправить текст, НЕ меняя стиль автора.
@@ -657,9 +667,10 @@ class WriterBot:
                     {"role": "user", "content": text},
                 ],
                 temperature=0.1, # Low temp for precision
-                max_tokens=2000,
+                max_tokens=min(8000, max(2000, len(text) // 2)),
             )
-            return (r.choices[0].message.content or "").strip()
+            result = (r.choices[0].message.content or "").strip()
+            return result + truncation_msg if was_truncated else result
         except Exception as e:
             return f"Error: {e}"
 
@@ -667,12 +678,25 @@ class WriterBot:
     def edit_text(self, text: str) -> str:
         if not self.client:
             return "Error: LLM client not initialized."
+        text, was_truncated = self._truncate_for_context(text)
+        truncation_msg = (
+            f"\n\n[ВНИМАНИЕ: Текст обрезан до {self.MAX_CONTEXT_CHARS} символов из-за ограничения контекста.]"
+            if self.language == "ru"
+            else f"\n\n[NOTE: Text truncated to {self.MAX_CONTEXT_CHARS} chars due to context limit.]"
+        )
         clean_suffix = "\n\nВАЖНО: Только чистый текст. Без звёздочек, без смайликов, без декоративных элементов." if self.language == "ru" else "\n\nIMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements."
         instr = """You are a sharp editor. For the given text: (1) Identify 1–3 clichés, dead metaphors, or weak expressions. (2) For each, offer 1–3 concrete alternative phrasings that are fresh, precise, and natural. Avoid awkward or overly poetic alternatives—suggest what a good writer would actually write. The alternatives should sound like real prose, not like a thesaurus threw up. Be concise. Use the same language as the input. Format clearly (e.g. "Original: ... → Alternatives: ..."). You MUST cite at least one principle from the provided editorial books with author name (e.g., 'As Nora Gal notes on dead metaphors...' or 'По Галь, штамп...'). Always name your source.""" + clean_suffix
-        return self.generate_response(text, temporary_system_instruction=instr, command="editor")
+        result = self.generate_response(text, temporary_system_instruction=instr, command="editor")
+        return result + truncation_msg if was_truncated else result
 
     # --- Methodique: RAG + analyze text against method book canon ---
     def methodique(self, text_or_idea: str) -> str:
+        text_or_idea, was_truncated = self._truncate_for_context(text_or_idea)
+        truncation_msg = (
+            f"\n\n[ВНИМАНИЕ: Текст обрезан до {self.MAX_CONTEXT_CHARS} символов из-за ограничения контекста.]"
+            if self.language == "ru"
+            else f"\n\n[NOTE: Text truncated to {self.MAX_CONTEXT_CHARS} chars due to context limit.]"
+        )
         level = self._get_detail_level(len(text_or_idea))
         instr_key = f"instr_methodique_{level}"
         base_instr = t(
@@ -708,7 +732,8 @@ class WriterBot:
         
         # If still no context, fall back to regular generate_response with automatic RAG
         if not diverse_contexts:
-            return self.generate_response(text_or_idea, temporary_system_instruction=base_instr, command="methodique")
+            result = self.generate_response(text_or_idea, temporary_system_instruction=base_instr, command="methodique")
+            return result + truncation_msg if was_truncated else result
         
         # Combine contexts and create instruction
         combined = "\n\n=== КОНТЕКСТ ИЗ МЕТОДИЧЕК ===\n\n" + "\n\n".join(diverse_contexts[:4]) + "\n\n=== КОНЕЦ КОНТЕКСТА ==="
@@ -763,7 +788,8 @@ Instruction: {base_instr}"""
                 temperature=0.2,  # Lower temperature to reduce hallucination
                 max_tokens=1000,
             )
-            return r.choices[0].message.content or ""
+            result = r.choices[0].message.content or ""
+            return result + truncation_msg if was_truncated else result
         except Exception as e:
             return f"Error: {e}"
 
@@ -939,9 +965,13 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                 if " — " in raw:
                     quote, writer = raw.rsplit(" — ", 1)
                     return (quote.strip(), writer.strip())
-                return (raw, "Unknown")
+                if raw:
+                    return (raw, "Unknown")
             except Exception as e:
                 print(f"Cite LLM error: {e}")
+        if self.language == "ru":
+            return ("Чистый лист — это зеркало", "Неизвестно")
+        return ("The blank page is a mirror", "Unknown")
 
     # --- Lobster: suffocating pessimistic speech (or small chance love for Adelina) ---
     def lobster(self) -> list[str]:
@@ -1123,7 +1153,7 @@ Output ONLY the pun, no explanation.""" + clean_suffix
     def generate_fresh_prompt(self) -> str:
         """Generate a new writing prompt using LLM based on existing patterns."""
         if not self.client:
-            return self.get_random_prompt()
+            return self._local_random_prompt()
         
         # Get some existing prompts as examples - use language-specific data
         data = self._load_prompts_data()
@@ -1171,9 +1201,9 @@ Output ONLY the prompt itself, no quotes around it.""" + clean_suffix
             result = (r.choices[0].message.content or "").strip()
             # Clean up quotes if LLM added them
             result = result.strip('"\'')
-            return result if result else self.get_random_prompt()
+            return result if result else self._local_random_prompt()
         except Exception:
-            return self.get_random_prompt()
+            return self._local_random_prompt()
 
     # --- Cry_baby: offer to cry, then reply with "0 words saved" etc ---
     def cry_baby_reply(self) -> str:

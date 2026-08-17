@@ -1,5 +1,5 @@
 """
-RAG pipeline for Writer's Tears bot.
+RAG pipeline for Ash bot.
 Books-only: ChromaDB + sentence-transformers over writing-craft book chunks.
 """
 

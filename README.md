@@ -1,6 +1,6 @@
-# Writer's Tears
+# Ash
 
-A Telegram bot for writers: creative block, ideas, exercises, feedback, and style analysis. Named after the Irish whiskey and the tears over a blank page.
+A Telegram bot for writers: creative block, ideas, exercises, feedback, and style analysis.
 
 ## Features
 
@@ -17,6 +17,9 @@ A Telegram bot for writers: creative block, ideas, exercises, feedback, and styl
 | `/style`   | Analyze style of excerpt       |
 | `/reset`   | Reset chat                     |
 | `/lang`    | Switch language (ru / en)      |
+| `/methodique` | Method-book analysis        |
+| `/upload`  | Send a .txt / .docx / .pdf     |
+| `/cite`    | Writer's quote                 |
 | `/help`    | Command list                   |
 
 ...and much more!
@@ -39,7 +42,7 @@ A Telegram bot for writers: creative block, ideas, exercises, feedback, and styl
    cd src
    python telegram_bot.py
    ```
-   Options: `--model gpt-4o-mini` (default), `--no-rag` to disable RAG.
+   Options: `--model deepseek-v4-pro` (default), `--no-rag` to disable RAG.
 
 ## RAG (books)
 
@@ -64,7 +67,7 @@ Without `book_chunks.json`, the bot runs without RAG and still answers using the
 ## Project layout
 
 ```
-writers-tears-bot/
+ash/
 ├── src/
 │   ├── writer_bot.py    # Core logic (block, develop, character, dialogue, prompt, idea, feedback, style)
 │   ├── writer_rag.py    # RAG over book chunks (ChromaDB + sentence-transformers)

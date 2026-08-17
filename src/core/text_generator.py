@@ -1,5 +1,5 @@
 """
-Core logic for Writer's Tears text generation.
+Core logic for Ash text generation.
 Separated from bot logic to be used by both Telegram bot and Web API.
 """
 
