@@ -15,39 +15,23 @@ import argparse
 import importlib.util
 from pathlib import Path
 
-# Setup paths
 script_dir = Path(__file__).parent.resolve()
 project_root = script_dir.parent.resolve()
 src_dir = project_root / "src"
 
-# Add src to path for imports
 sys.path.insert(0, str(src_dir))
-
-# Change to project root for dotenv
 os.chdir(project_root)
 
-# Load dotenv
 from dotenv import load_dotenv
 load_dotenv()
 
-# Import code_reviewer functions
 from code_reviewer import (
-    generate_changelog_with_llm,
-    get_changed_files, 
+    TRACKED_FILES,
+    check_and_generate_changelog,
+    get_changed_files,
     load_stored_hashes,
-    save_hashes,
-    calculate_file_hash
+    save_current_hashes,
 )
-
-# Tracked files list (must match code_reviewer.py)
-TRACKED_FILES = [
-    "src/telegram_bot.py",
-    "src/writer_bot.py", 
-    "src/i18n.py",
-    "src/writer_rag.py",
-    "src/lang_utils.py",
-    "src/word_stats.py",
-]
 
 
 def load_writer_bot():
@@ -60,37 +44,30 @@ def load_writer_bot():
 
 
 def print_header(text, width=70):
-    """Print formatted header."""
     print("\n" + "=" * width)
     print(f" {text}")
     print("=" * width)
 
 
 def print_section(text):
-    """Print section header."""
     print(f"\n▶ {text}")
 
 
 def print_success(text):
-    """Print success message."""
     print(f"  ✓ {text}")
 
 
 def print_error(text):
-    """Print error message."""
     print(f"  ✗ {text}")
 
 
 def print_info(text):
-    """Print info message."""
     print(f"  • {text}")
 
 
 def check_env():
-    """Check if required environment variables are set."""
     required = ["OPENAI_API_KEY"]
     missing = [var for var in required if not os.getenv(var)]
-    
     if missing:
         print_error(f"Missing environment variables: {', '.join(missing)}")
         print_info("Make sure .env file exists in project root")
@@ -99,16 +76,13 @@ def check_env():
 
 
 def test_changelog(lang="ru", save_hashes=False):
-    """Test changelog generation."""
     print_header(f"CHANGELOG TEST [{lang.upper()}]")
-    
-    # Check environment
+
     print_section("Checking environment...")
     if not check_env():
         return 1
     print_success("Environment OK")
-    
-    # Load WriterBot
+
     print_section("Loading WriterBot...")
     try:
         WriterBot = load_writer_bot()
@@ -118,8 +92,7 @@ def test_changelog(lang="ru", save_hashes=False):
         import traceback
         traceback.print_exc()
         return 1
-    
-    # Create instance
+
     print_section("Initializing LLM client...")
     try:
         wb = WriterBot(
@@ -134,69 +107,74 @@ def test_changelog(lang="ru", save_hashes=False):
         import traceback
         traceback.print_exc()
         return 1
-    
-    # Check for changes
+
     print_section("Scanning for code changes...")
     data_dir = project_root / "data"
     stored_hashes = load_stored_hashes(data_dir)
+    if not stored_hashes:
+        print_info("No baseline hashes — first run would save a silent baseline")
+        print_info("Run with --save-hashes or: python3 scripts/init_code_cache.py")
+        if save_hashes:
+            save_current_hashes(project_root)
+            print_success("Baseline saved")
+        return 0
+
     changed_files = get_changed_files(project_root, stored_hashes)
-    
     if not changed_files:
         print_info("No code changes detected")
         print_info("Next restart will NOT show 'bot updated' message")
         print_info("To force changelog, modify any tracked file or delete data/code_hashes.json")
+        print_info(f"Tracked files: {', '.join(TRACKED_FILES)}")
         return 0
-    
+
     print_success(f"Found {len(changed_files)} changed file(s):")
     for rel_path, old_hash, new_hash in changed_files:
         status = "NEW" if not old_hash else "MODIFIED"
         print_info(f"{rel_path:30} [{status}]")
-    
-    # Generate changelog
+
     print_section("Generating changelog with LLM...")
     print_info("This may take a few seconds...")
-    
+
     try:
-        changelog = generate_changelog_with_llm(
-            wb, changed_files, project_root, lang
+        changelog = check_and_generate_changelog(
+            project_root,
+            wb,
+            admin_id=0,
+            lang=lang,
+            should_save_hashes=save_hashes,
         )
-        
+
         if changelog:
             print_header("CHANGELOG PREVIEW", width=70)
             print(changelog)
             print("=" * 70)
-            
+
             print_section("Summary")
             print_success("Changelog generated successfully")
             print_info(f"Language: {lang}")
             print_info(f"Changed files: {len(changed_files)}")
-            
             if save_hashes:
-                print_section("Updating hash cache...")
-                current_hashes = {}
-                for rel_path in TRACKED_FILES:
-                    file_path = project_root / rel_path
-                    if file_path.exists():
-                        current_hashes[rel_path] = calculate_file_hash(file_path)
-                save_hashes(data_dir, current_hashes)
                 print_success("Cache updated - next restart won't trigger notifications")
             else:
                 print_info("Run with --save-hashes to update cache")
                 print_info("Or run: python3 scripts/init_code_cache.py")
         else:
-            print_error("No changelog generated (check code_reviewer logs above)")
-        
+            print_info("No user-facing changelog (internal-only or empty LLM answer)")
+            if save_hashes:
+                print_success("Cache updated")
+            else:
+                print_info("Run with --save-hashes to update cache")
+
     except Exception as e:
         print_error(f"Error generating changelog: {e}")
         import traceback
         traceback.print_exc()
         return 1
-    
+
     return 0
 
 
 def main():
-    """Parse arguments and run test."""
     parser = argparse.ArgumentParser(
         description="Test changelog generation without restarting the bot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -205,22 +183,22 @@ Examples:
   python3 scripts/test_changelog.py              # Test in Russian (default)
   python3 scripts/test_changelog.py --lang en    # Test in English
   python3 scripts/test_changelog.py --save-hashes # Test and update cache
-        """
+        """,
     )
     parser.add_argument(
-        "--lang", 
-        choices=["ru", "en"], 
+        "--lang",
+        choices=["ru", "en"],
         default="ru",
-        help="Language for changelog (default: ru)"
+        help="Language for changelog (default: ru)",
     )
     parser.add_argument(
         "--save-hashes",
         action="store_true",
-        help="Update hash cache after testing (prevents duplicate notifications)"
+        help="Update hash cache after testing (prevents duplicate notifications)",
     )
-    
+
     args = parser.parse_args()
-    exit(test_changelog(lang=args.lang, save_hashes=args.save_hashes))
+    raise SystemExit(test_changelog(lang=args.lang, save_hashes=args.save_hashes))
 
 
 if __name__ == "__main__":

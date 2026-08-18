@@ -119,6 +119,8 @@ LOCALES: Dict[str, Dict[str, str]] = {
         "discuss_exit": "Вышли из режима обсуждения. Возвращаемся к обычному чату.",
         "instr_corrector": "Ты — редактор. Исправь грамматические, пунктуационные и стилистические ошибки. Объясни ключевые исправления.",
         "instr_editor": "Ты — редактор по Норе Галь. Найди штампы, мёртвые метафоры, канцеляризмы. Предложи живые альтернативы.",
+        "update_notification_header": "<b>Обновление</b>\n\n",
+        "update_notification_footer": "",
     },
     "en": {
         "button_prompt": "Prompt",
@@ -238,6 +240,8 @@ LOCALES: Dict[str, Dict[str, str]] = {
         "discuss_exit": "Exited discussion mode. Back to normal chat.",
         "instr_corrector": "You are an editor. Fix grammar, punctuation, and style errors. Explain key corrections.",
         "instr_editor": "You are an editor per Nora Gal. Find clichés, dead metaphors, officialese. Suggest lively alternatives.",
+        "update_notification_header": "<b>Update</b>\n\n",
+        "update_notification_footer": "",
     },
 }
 

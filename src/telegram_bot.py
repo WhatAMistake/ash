@@ -60,6 +60,55 @@ try:
     AIogram_AVAILABLE = True
 except ImportError:
     AIogram_AVAILABLE = False
+    print("aiogram not installed. Install: pip install aiogram")
+
+    class _DummyAiogramTypes:
+        Message = object
+
+    class _DummyF:
+        text = voice = photo = sticker = document = None
+
+        def __getattr__(self, name):
+            return self
+
+        def startswith(self, *_args, **_kwargs):
+            return self
+
+        def __and__(self, _other):
+            return self
+
+        def __invert__(self):
+            return self
+
+    class _DummyKeyboardButton:
+        def __init__(self, text: str = ""):
+            self.text = text
+
+    class _DummyMarkup:
+        def __init__(self, buttons=None, resize_keyboard: bool = True):
+            self.buttons = buttons or []
+            self.resize_keyboard = resize_keyboard
+
+    class _DummyReplyKeyboardBuilder:
+        def __init__(self):
+            self._buttons = []
+
+        def add(self, *buttons):
+            self._buttons.extend(buttons)
+            return self
+
+        def adjust(self, *args, **kwargs):
+            return self
+
+        def as_markup(self, resize_keyboard: bool = True):
+            return _DummyMarkup(self._buttons, resize_keyboard=resize_keyboard)
+
+    types = _DummyAiogramTypes()
+    F = _DummyF()
+    Bot = Dispatcher = Command = None
+    ReplyKeyboardMarkup = _DummyMarkup
+    KeyboardButton = _DummyKeyboardButton
+    ReplyKeyboardBuilder = _DummyReplyKeyboardBuilder
 
 from writer_bot import WriterBot
 from lang_utils import detect_language
@@ -2485,6 +2534,23 @@ class TelegramWriterBot:
         
         # Get state FIRST
         state = self.user_states.get(user_id, "chat")
+
+        # Admin changelog confirm/edit must run before summary buttons or accumulation.
+        if user_id == ADMIN_ID and state.startswith("update_"):
+            cancel_texts = {"❌ отмена", "отмена", "cancel", "/cancel"}
+            if text.strip().lower() in cancel_texts:
+                self._clear_pending_update(user_id)
+                await message.answer(
+                    "❌ Рассылка обновлений отменена",
+                    reply_markup=get_main_keyboard(lang),
+                )
+                return
+            if state == "update_confirm":
+                await self._handle_update_confirm_input(message, text)
+                return
+            if state in ("update_edit_ru", "update_edit_en"):
+                await self._handle_update_edit_input(message, state, text)
+                return
         
         # ===== SUMMARY BUTTONS CHECK (before accumulation) =====
         # Check for summary button presses first (before they get accumulated as text)
