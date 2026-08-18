@@ -21,8 +21,8 @@ langdetect>=1.0.9
 chromadb>=0.4.0
 sentence-transformers>=2.2.0
 
-# Telegram bot
-aiogram>=3.0.0
+# Telegram bot (3.21+ for BusinessConnection.rights.can_reply / business_message)
+aiogram>=3.21.0,<4.0.0
 
 # Local LLM (optional)
 # llama-cpp-python>=0.2.0
