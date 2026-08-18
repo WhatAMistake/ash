@@ -351,6 +351,145 @@ def _is_empty_changelog(text: str) -> bool:
     return any(marker in cleaned for marker in empty_markers)
 
 
+_THINK_TAG_RE = re.compile(
+    r"<(think|thinking|thought|reasoning)\b[^>]*>.*?</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+_THINK_OPEN_RE = re.compile(
+    r"<(think|thinking|thought|reasoning)\b[^>]*>[\s\S]*",
+    re.IGNORECASE,
+)
+_THINK_ALT_RE = re.compile(
+    r"(?:\[/?think\]|\[/thinking\]|◁/?think▷)",
+    re.IGNORECASE,
+)
+_ANSWER_MARKER_RE = re.compile(
+    r"(?is)(?:^|\n)\s*(?:"
+    r"final\s+answer|answer|changelog|итоговый\s+changelog|итог|итого|ответ"
+    r")\s*[:\-]\s*"
+)
+_TECHNICAL_RE = re.compile(
+    r"(?ix)"
+    r"(\b(src/|def\s+|class\s+|import\s+|from\s+\S+\s+import|async\s+def|"
+    r"unified\s+diff|file\s+hash|code\s+hash|refactor(?:ing)?\b|traceback\b|"
+    r"max_tokens|api[_\s]?key)|"
+    r"\w+\.py\b|`[^`]+`|"
+    r"[a-z_][a-z0-9_]{2,}\.[a-z_][a-z0-9_]+\()"
+)
+_ANALYSIS_PREFIX_RE = re.compile(
+    r"(?ix)^(?:"
+    r"looking at|let me|i (?:will|need to|see|notice|think)|"
+    r"the (?:diff|change|file|code)|this (?:diff|change|file|update)|"
+    r"смотрю|давайте|анализ|рассужд|в файле|в диффе"
+    r")"
+)
+MAX_CHANGELOG_BULLETS = 3
+MAX_BULLET_CHARS = 140
+MAX_CHANGELOG_CHARS = 420
+
+
+def _extract_completion_text(response) -> str:
+    """Take only the visible assistant text. Never include reasoning fields."""
+    try:
+        message = response.choices[0].message
+    except Exception:
+        return ""
+
+    content = getattr(message, "content", None)
+    if content is None and isinstance(message, dict):
+        content = message.get("content")
+
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                part_type = str(part.get("type") or "").lower()
+                if part_type in {"thinking", "reasoning", "thought"}:
+                    continue
+                parts.append(str(part.get("text") or part.get("content") or ""))
+        content = "".join(parts)
+
+    return (content or "").strip()
+
+
+def _strip_model_thoughts(text: str) -> str:
+    """Hide chain-of-thought / analysis and keep only the final answer."""
+    if not text:
+        return ""
+
+    cleaned = text.replace("\r\n", "\n")
+    cleaned = _THINK_TAG_RE.sub("", cleaned)
+    cleaned = _THINK_OPEN_RE.sub("", cleaned)
+    cleaned = _THINK_ALT_RE.sub("", cleaned)
+
+    marker = _ANSWER_MARKER_RE.search(cleaned)
+    if marker:
+        cleaned = cleaned[marker.end():]
+
+    return cleaned.strip()
+
+
+def _looks_technical(line: str) -> bool:
+    if _TECHNICAL_RE.search(line):
+        return True
+    if _ANALYSIS_PREFIX_RE.search(line.strip()):
+        return True
+    return False
+
+
+def _sanitize_changelog(text: str) -> str:
+    """
+    Turn a raw model reply into a short user-facing changelog.
+    Drops hidden thoughts, analysis, and technical leftovers.
+    """
+    cleaned = _strip_model_thoughts(text)
+    cleaned = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", cleaned).strip()
+    if not cleaned:
+        return ""
+    # Whole-reply empty answers like NONE / НЕТ should stay silent.
+    if "\n" not in cleaned and _is_empty_changelog(cleaned):
+        return ""
+
+    raw_lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    has_explicit_bullets = any(
+        re.match(r"^(?:[-*•]|—|\d+[.)])\s+", raw) for raw in raw_lines
+    )
+    # Several unmarked lines are leftover reasoning, not a release note.
+    if not has_explicit_bullets and len(raw_lines) > 1:
+        return ""
+
+    bullets: List[str] = []
+    for raw in raw_lines:
+        was_bullet = bool(re.match(r"^(?:[-*•]|—|\d+[.)])\s+", raw))
+        if has_explicit_bullets and not was_bullet:
+            continue
+        line = re.sub(r"^(?:[-*•]|—|\d+[.)])\s+", "", raw).strip()
+        line = line.strip("`\"'")
+        if not line or _is_empty_changelog(line):
+            continue
+        if _looks_technical(line):
+            continue
+        # Long prose is almost always leftover reasoning, not a release note.
+        if len(line) > MAX_BULLET_CHARS:
+            if not was_bullet:
+                continue
+            line = line[: MAX_BULLET_CHARS - 1].rstrip(" ,;:") + "…"
+        if line not in bullets:
+            bullets.append(line)
+        if len(bullets) >= MAX_CHANGELOG_BULLETS:
+            break
+
+    if not bullets:
+        return ""
+
+    result = "\n".join(f"• {item}" for item in bullets)
+    if len(result) > MAX_CHANGELOG_CHARS:
+        result = result[: MAX_CHANGELOG_CHARS - 1].rstrip() + "…"
+    return result
+
+
 def generate_changelog_with_llm(
     writer_bot,
     changed_files: List[Tuple[str, str, str]],
@@ -386,18 +525,17 @@ def generate_changelog_with_llm(
     known_cmds = ", ".join(f"/{c}" for c in EXISTING_COMMANDS)
 
     if lang == "ru":
-        prompt = f"""Ты пишешь краткий changelog для пользователей Telegram-бота — писательского редактора Ash.
+        prompt = f"""Напиши короткий changelog для обычных пользователей Telegram-бота Ash — писательского редактора.
 
-Ниже — РЕАЛЬНЫЙ diff (старое → новое). Пиши ТОЛЬКО по этому diff.
-Не додумывай фичи, которых нет в diff.
+Ниже — РЕАЛЬНЫЙ diff. Пиши ТОЛЬКО по нему. Не выдумывай.
 
 Правила:
-1) Только изменения, ЗАМЕТНЫЕ пользователю: новые/починенные команды, ответы бота, тексты, режимы, UX.
-2) Игнорируй: рефакторинг, импорты, хеши, логи, внутренние хелперы, переименования без эффекта.
-3) Если пользовательски видимых изменений нет — верни ровно: НЕТ
-4) 1–3 коротких пункта, без вступлений и без markdown (*_#).
+1) Только то, что человек заметит в боте: новые/починенные команды, ответы, тексты, режимы.
+2) Игнорируй код, рефакторинг, импорты, хеши, логи, внутренние функции.
+3) Если видимых изменений нет — верни ровно: НЕТ
+4) 1–3 очень коротких пункта. Без вступлений, без анализа, без markdown.
 5) Не называй «новой» команду из списка известных, если она лишь правилась.
-6) Если команда реально новая — можно упомянуть.
+6) Не пиши ход мыслей, не цитируй diff, не называй файлы и функции.
 7) Тон: конкретный и едкий, как у старого редактора.
 
 Известные команды (не новые сами по себе): {known_cmds}
@@ -406,24 +544,24 @@ def generate_changelog_with_llm(
 DIFF:
 {diff_content}
 
-Ответ: либо «НЕТ», либо 1–3 пункта changelog на русском."""
+Верни только готовые пункты или «НЕТ». Никакого рассуждения."""
         system = (
-            "Ты редактор release notes. Только факты из diff. "
-            "Если сомневаешься — ответь НЕТ. Без markdown."
+            "Ты редактор коротких пользовательских release notes. "
+            "Отвечай только финальными пунктами. Никакого анализа и скрытых мыслей. "
+            "Если сомневаешься — ответь НЕТ."
         )
     else:
-        prompt = f"""You write a brief changelog for users of Ash, a writing-coach Telegram bot.
+        prompt = f"""Write a short changelog for ordinary users of Ash, a writing-coach Telegram bot.
 
-Below is a REAL diff (old → new). Write ONLY from this diff.
-Do not invent features that are not in the diff.
+Below is a REAL diff. Write ONLY from it. Do not invent features.
 
 Rules:
-1) Only USER-VISIBLE changes: new/fixed commands, bot replies, copy, modes, UX.
-2) Ignore: refactoring, imports, hashes, logs, internal helpers, renames with no effect.
+1) Only what a person will notice in the bot: new/fixed commands, replies, copy, modes.
+2) Ignore code, refactoring, imports, hashes, logs, internal helpers.
 3) If there are no user-visible changes — return exactly: NONE
-4) 1–3 short bullets, no preamble, no markdown (*_#).
+4) 1–3 very short bullets. No preamble, no analysis, no markdown.
 5) Do not call a command "new" if it only appears in the known list and was merely edited.
-6) Truly new commands may be mentioned.
+6) Do not show your reasoning, quote the diff, or name files and functions.
 7) Tone: specific and cynical, like an old editor.
 
 Known commands (not new by themselves): {known_cmds}
@@ -432,10 +570,11 @@ New commands hinted by diff (may be empty): {new_cmds}
 DIFF:
 {diff_content}
 
-Answer: either NONE or 1–3 changelog bullets in English."""
+Return only the finished bullets or NONE. No reasoning."""
         system = (
-            "You write release notes. Facts from the diff only. "
-            "If unsure, answer NONE. No markdown."
+            "You write short user-facing release notes. "
+            "Reply with the final bullets only. No analysis and no hidden thoughts. "
+            "If unsure, answer NONE."
         )
 
     try:
@@ -447,16 +586,10 @@ Answer: either NONE or 1–3 changelog bullets in English."""
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.15,
-                max_tokens=400,
+                max_tokens=180,
             )
-            changelog = (response.choices[0].message.content or "").strip()
-
-            if _is_empty_changelog(changelog):
-                return ""
-
-            # Strip accidental fences / labels
-            changelog = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", changelog).strip()
-            if _is_empty_changelog(changelog):
+            changelog = _sanitize_changelog(_extract_completion_text(response))
+            if not changelog:
                 return ""
 
             witty = get_witty_comment(change_set.get("changed_files_count", 1), lang)
