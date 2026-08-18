@@ -4,6 +4,7 @@ Telegram bot for Ash — writing coach.
 
 import os
 import asyncio
+import html
 import json
 import random
 import io
@@ -64,7 +65,7 @@ from writer_bot import WriterBot
 from lang_utils import detect_language
 from i18n import t
 from word_stats import add_word_count, get_stats, count_words, count_chars, reset_stats
-from code_reviewer import check_and_generate_changelog
+from code_reviewer import check_and_generate_changelog, save_current_hashes
 
 # Import init_cache functionality for auto-updating after restart
 import sys
@@ -183,6 +184,33 @@ def get_main_keyboard(lang: str = "en"):
     return builder.as_markup(resize_keyboard=True)
 
 
+def get_cancel_keyboard() -> ReplyKeyboardMarkup:
+    """Keyboard with a cancel button for admin update editing."""
+    builder = ReplyKeyboardBuilder()
+    builder.add(KeyboardButton(text="❌ Отмена"))
+    return builder.as_markup(resize_keyboard=True)
+
+
+def get_update_confirm_keyboard() -> ReplyKeyboardMarkup:
+    """Admin keyboard for update changelog confirmation."""
+    builder = ReplyKeyboardBuilder()
+    builder.add(KeyboardButton(text="✅ Да"))
+    builder.add(KeyboardButton(text="✏️ Править"))
+    builder.add(KeyboardButton(text="❌ Нет"))
+    builder.adjust(3)
+    return builder.as_markup(resize_keyboard=True)
+
+
+_UPDATE_CONFIRM_YES = {"да", "yes", "д", "y", "✅ да", "✅"}
+_UPDATE_CONFIRM_EDIT = {
+    "edit", "править", "изменить", "редакт", "редактирование",
+    "✏️ править", "✏️", "правка",
+}
+_UPDATE_CONFIRM_NO = {
+    "нет", "no", "н", "n", "cancel", "отмена", "❌ нет", "❌", "❌ отмена",
+}
+
+
 class TelegramWriterBot:
     """Telegram front-end for Ash."""
 
@@ -243,7 +271,7 @@ class TelegramWriterBot:
         self.user_last_activity: dict[int, datetime] = {}
         self.bot_last_activity: datetime = datetime.now()  # Track bot's own activity
         self.AUTO_DISABLE_DAYS: int = 17  # Days of inactivity before auto-disable
-        self.pending_changelog: Optional[str] = None  # Store changelog to show to users
+        self.admin_id = ADMIN_ID
         
         # Track all users for broadcasts (not just those with lang prefs)
         self.all_users: set[int] = set()
@@ -251,10 +279,6 @@ class TelegramWriterBot:
         # User preferences persistence (copied from therapist bot)
         self.prefs_path = Path(__file__).parent.parent / "data" / "user_prefs.json"
         self._load_user_prefs()
-        
-        # Changelog cooldown tracking
-        self.changelog_cooldown_hours: int = 1  # Minimum hours between changelogs
-        self.changelog_last_sent_path = Path(__file__).parent.parent / "data" / "changelog_last_sent.txt"
 
         # Unified state configuration: state_name -> (min_length, handler_method_name or None)
         # This eliminates duplication across waiting_states, accumulation_states, and state_handlers
@@ -327,55 +351,8 @@ class TelegramWriterBot:
         except Exception as e:
             print(f"Failed to get bot info: {e}")
         
-        # Check for code changes and generate changelog
-        project_root = Path(__file__).parent.parent
-        try:
-            # Create a temporary writer bot for LLM calls
-            wb = WriterBot(
-                model=self.llm_model,
-                api_key=self.llm_api_key,
-                api_base=self.llm_api_base,
-                use_rag=False,  # No RAG needed for changelog
-                language="ru",
-            )
-            # Do not create deploy tag until admin confirms a successful broadcast
-            changelog = check_and_generate_changelog(
-                project_root=project_root,
-                writer_bot=wb,
-                admin_id=ADMIN_ID,
-                lang="ru",
-                should_save_tag=False,
-            )
-            if changelog:
-                # Store changelog and wait for admin confirmation
-                self.pending_changelog = changelog
-                # Send preview to admin for confirmation
-                if ADMIN_ID:
-                    preview = (
-                        f"<b>Changelog Preview</b>\n\n"
-                        f"{changelog[:300]}{'...' if len(changelog) > 300 else ''}\n\n"
-                        f"Recipients: {len(self.all_users)}\n\n"
-                        f"Send to all users? Reply <b>yes</b> to confirm."
-                    )
+        await self._check_and_notify_updates()
 
-                    try:
-                        await self.bot.send_message(
-                            ADMIN_ID,
-                            preview,
-                            parse_mode="HTML"
-                        )
-                        self.user_states[ADMIN_ID] = "changelog_confirm"
-                        print(f"Changelog generated, waiting for admin {ADMIN_ID} confirmation")
-                    except Exception as e:
-                        print(f"Failed to send changelog preview to admin: {e}")
-                else:
-                    print("Changelog generated but no ADMIN_ID set, skipping broadcast")
-
-
-
-        except Exception as e:
-            print(f"Changelog check failed: {e}")
-        
         # Start polling
         # Start background task for auto porko/lobster in group chats
         self.porko_lobster_task = asyncio.create_task(self._porko_lobster_background_loop())
@@ -507,6 +484,34 @@ class TelegramWriterBot:
         for idx, chunk in enumerate(chunks):
             markup = reply_markup if idx == len(chunks) - 1 else None
             await message.answer(chunk, reply_markup=markup, parse_mode=parse_mode)
+
+    async def send_long_message(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str = None,
+        reply_markup=None,
+    ) -> None:
+        """Send a message by chat_id, chunking if it exceeds Telegram's limit."""
+        if text is None:
+            text = ""
+        text = str(text)
+        if not text:
+            return
+
+        limit = 4000
+        if len(text) <= limit:
+            await self.bot.send_message(
+                chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup
+            )
+            return
+
+        chunks = [text[i:i + limit] for i in range(0, len(text), limit)]
+        for idx, chunk in enumerate(chunks):
+            markup = reply_markup if idx == len(chunks) - 1 else None
+            await self.bot.send_message(
+                chat_id, chunk, parse_mode=parse_mode, reply_markup=markup
+            )
 
     async def _finish_tool(
         self,
@@ -1574,38 +1579,284 @@ class TelegramWriterBot:
         """Track group chat activity for auto-activation."""
         self.last_auto_activation[chat_id] = datetime.now()
 
-    async def _process_update_broadcast(self):
-        """Process pending update changelog broadcast to all users."""
-        if not getattr(self, "pending_changelog", None):
+    def _clear_pending_update(self, admin_id: Optional[int] = None) -> None:
+        """Drop pending update changelogs and leave the update-confirm flow."""
+        if hasattr(self, "pending_update_changelogs"):
+            del self.pending_update_changelogs
+        target_id = admin_id if admin_id is not None else self.admin_id
+        if self.user_states.get(target_id, "").startswith("update_"):
+            self.user_states[target_id] = "chat"
+
+    def _format_update_preview(self, changelogs: dict) -> str:
+        """Build HTML preview of RU/EN changelogs for admin confirmation."""
+        preview_limit = 1200
+        changelog_ru = (changelogs or {}).get("ru") or ""
+        changelog_en = (changelogs or {}).get("en") or ""
+
+        def _clip(text: str) -> str:
+            if not text:
+                return "—"
+            safe = html.escape(text)
+            if len(text) > preview_limit:
+                return html.escape(text[:preview_limit]) + "..."
+            return safe
+
+        recipients = len(self.all_users) or len(self.user_langs)
+        return "\n".join([
+            "📋 <b>Предпросмотр обновления</b>",
+            "",
+            f"Получателей: <b>{recipients}</b>",
+            "",
+            "<b>RU:</b>",
+            _clip(changelog_ru),
+            "",
+            "<b>EN:</b>",
+            _clip(changelog_en),
+            "",
+            "Отправить?",
+            "• <b>да</b> — разослать как есть",
+            "• <b>править</b> — отредактировать RU, затем EN",
+            "• <b>нет</b> — отменить рассылку",
+        ])
+
+    async def _send_update_preview(self, chat_id: int, changelogs: dict) -> None:
+        """Send update preview and put admin into confirmation state."""
+        self.pending_update_changelogs = {
+            "ru": (changelogs or {}).get("ru") or "",
+            "en": (changelogs or {}).get("en") or "",
+        }
+        self.user_states[chat_id] = "update_confirm"
+        await self.send_long_message(
+            chat_id,
+            self._format_update_preview(self.pending_update_changelogs),
+            parse_mode="HTML",
+            reply_markup=get_update_confirm_keyboard(),
+        )
+
+    async def _start_update_edit(self, message: types.Message) -> None:
+        """Begin bilingual changelog editing: RU first, then EN."""
+        user_id = message.from_user.id
+        changelogs = getattr(self, "pending_update_changelogs", None)
+        if not changelogs:
+            self.user_states[user_id] = "chat"
+            await message.answer(
+                "Нет черновика обновления для редактирования.",
+                reply_markup=get_main_keyboard(self.user_langs.get(user_id, DEFAULT_LANG)),
+            )
             return
 
-        changelog = self.pending_changelog
+        self.user_states[user_id] = "update_edit_ru"
+        current_ru = changelogs.get("ru") or "—"
+        await message.answer(
+            "✏️ <b>Редактирование changelog (RU)</b>\n\n"
+            "Отправьте полный русский текст одним сообщением.\n"
+            "Текущая версия:",
+            parse_mode="HTML",
+            reply_markup=get_cancel_keyboard(),
+        )
+        await self.send_long_message(user_id, current_ru)
+
+    async def _handle_update_confirm_input(self, message: types.Message, text: str) -> None:
+        """Handle yes / edit / no while an update broadcast is pending."""
+        user_id = message.from_user.id
+        choice = (text or "").strip().lower()
+
+        if choice in _UPDATE_CONFIRM_YES:
+            await message.answer(
+                "✅ Начинаю рассылку обновлений...",
+                reply_markup=get_main_keyboard(self.user_langs.get(user_id, DEFAULT_LANG)),
+            )
+            await self._process_update_broadcast()
+            return
+
+        if choice in _UPDATE_CONFIRM_EDIT:
+            await self._start_update_edit(message)
+            return
+
+        if choice in _UPDATE_CONFIRM_NO:
+            self._clear_pending_update(user_id)
+            await message.answer(
+                "❌ Рассылка обновлений отменена",
+                reply_markup=get_main_keyboard(self.user_langs.get(user_id, DEFAULT_LANG)),
+            )
+            return
+
+        await message.answer(
+            "Ответьте <b>да</b>, <b>править</b> или <b>нет</b>.",
+            parse_mode="HTML",
+            reply_markup=get_update_confirm_keyboard(),
+        )
+
+    async def _handle_update_edit_input(self, message: types.Message, state: str, text: str) -> None:
+        """Save edited RU/EN changelog text and continue the flow."""
+        user_id = message.from_user.id
+        if not hasattr(self, "pending_update_changelogs"):
+            self.user_states[user_id] = "chat"
+            await message.answer(
+                "Черновик обновления уже неактуален.",
+                reply_markup=get_main_keyboard(self.user_langs.get(user_id, DEFAULT_LANG)),
+            )
+            return
+
+        edited = (text or "").strip()
+        if not edited:
+            await message.answer(
+                "Текст не может быть пустым. Пришлите полный changelog или нажмите отмену.",
+                reply_markup=get_cancel_keyboard(),
+            )
+            return
+
+        if len(edited) > 3500:
+            await message.answer(
+                "❌ Слишком длинный текст (максимум 3500 символов). Сократите и отправьте снова.",
+                reply_markup=get_cancel_keyboard(),
+            )
+            return
+
+        if state == "update_edit_ru":
+            self.pending_update_changelogs["ru"] = edited
+            self.user_states[user_id] = "update_edit_en"
+            current_en = self.pending_update_changelogs.get("en") or "—"
+            await message.answer(
+                "✅ RU сохранён.\n\n"
+                "✏️ <b>Редактирование changelog (EN)</b>\n\n"
+                "Отправьте полный английский текст одним сообщением.\n"
+                "Текущая версия:",
+                parse_mode="HTML",
+                reply_markup=get_cancel_keyboard(),
+            )
+            await self.send_long_message(user_id, current_en)
+            return
+
+        self.pending_update_changelogs["en"] = edited
+        await message.answer("✅ EN сохранён. Обновлённый предпросмотр:")
+        await self._send_update_preview(user_id, self.pending_update_changelogs)
+
+    async def _process_update_broadcast(self):
+        """Send confirmed bilingual changelogs to all known users."""
+        if not hasattr(self, "pending_update_changelogs"):
+            return
+
+        changelogs = self.pending_update_changelogs
+        del self.pending_update_changelogs
+        if self.user_states.get(self.admin_id, "").startswith("update_"):
+            self.user_states[self.admin_id] = "chat"
+
         sent_count = 0
         failed_count = 0
-        
-        for user_id in list(self.all_users):
-            try:
-                await self.bot.send_message(
-                    user_id,
-                    f"<b>Обновление бота</b>\n\n{changelog}",
-                    parse_mode="HTML"
-                )
+        failed_users = []
+        recipients = set(self.all_users) | set(self.user_langs.keys())
 
-                # Включаем ежедневные цитаты для всех пользователей после обновления
-                self.user_cite_enabled[user_id] = True
-                self.user_cite_last_time[user_id] = datetime.now() - timedelta(hours=23)  # Отправит цитату скоро
-                
+        for user_id in list(recipients):
+            try:
+                user_lang = self.user_langs.get(user_id, DEFAULT_LANG)
+                if user_lang == "ru" and changelogs.get("ru"):
+                    changelog = changelogs["ru"]
+                elif user_lang == "en" and changelogs.get("en"):
+                    changelog = changelogs["en"]
+                else:
+                    changelog = changelogs.get("ru") or changelogs.get("en") or "Internal updates."
+
+                header = t(user_lang, "update_notification_header")
+                footer = t(user_lang, "update_notification_footer")
+                localized_changelog = f"{header}{html.escape(str(changelog))}{footer}"
+
+                await self.send_long_message(
+                    user_id,
+                    localized_changelog,
+                    parse_mode="HTML",
+                )
                 sent_count += 1
-            except Exception:
+            except Exception as e:
                 failed_count += 1
-        
-        # Сохраняем настройки пользователей
-        self._save_user_prefs()
-        
-        # Clear pending changelog
-        self.pending_changelog = None
-        
+                failed_users.append(str(user_id))
+                print(f"[UPDATE BROADCAST] Failed to send to {user_id}: {e}")
+
+        report_lines = [
+            "✅ <b>Рассылка обновлений завершена</b>",
+            "",
+            f"📤 Успешно отправлено: <b>{sent_count}</b>",
+            f"❌ Ошибок: <b>{failed_count}</b>",
+        ]
+        if failed_count > 0:
+            report_lines.append("")
+            report_lines.append(
+                f"Не удалось отправить пользователям: {', '.join(failed_users[:10])}"
+            )
+            if len(failed_users) > 10:
+                report_lines.append(f"... и ещё {len(failed_users) - 10}")
+
+        print(
+            f"[UPDATE BROADCAST] Admin sent update broadcast to "
+            f"{sent_count}/{len(recipients)} users"
+        )
+        init_cache()
+        if self.admin_id:
+            await self.send_long_message(
+                self.admin_id,
+                "\n".join(report_lines),
+                parse_mode="HTML",
+                reply_markup=get_main_keyboard(
+                    self.user_langs.get(self.admin_id, DEFAULT_LANG)
+                ),
+            )
         return sent_count, failed_count
+
+    async def _check_and_notify_updates(self):
+        """Check for code updates and ask admin to confirm a bilingual broadcast."""
+        try:
+            project_root = Path(__file__).parent.parent
+            print("[UPDATE CHECK] Starting update check...")
+            print(f"[UPDATE CHECK] Project root: {project_root}")
+            print(f"[UPDATE CHECK] Admin ID: {self.admin_id}")
+            print(f"[UPDATE CHECK] Users in memory: {len(self.all_users) or len(self.user_langs)}")
+
+            wb = WriterBot(
+                model=self.llm_model,
+                api_key=self.llm_api_key,
+                api_base=self.llm_api_base,
+                use_rag=False,
+                language="ru",
+            )
+            print(f"[UPDATE CHECK] WriterBot initialized: {wb is not None}")
+            print("[UPDATE CHECK] Generating changelogs...")
+            changelog_ru = check_and_generate_changelog(
+                project_root, wb, self.admin_id, "ru", should_save_hashes=False
+            )
+            changelog_en = check_and_generate_changelog(
+                project_root, wb, self.admin_id, "en", should_save_hashes=False
+            )
+
+            # Always refresh hash+snapshot baseline after a check.
+            # Otherwise technical-only diffs re-fire on every restart.
+            save_current_hashes(project_root)
+
+            print(
+                f"[UPDATE CHECK] Changelog RU: "
+                f"{'YES (' + str(len(changelog_ru)) + ' chars)' if changelog_ru else 'NO'}"
+            )
+            print(
+                f"[UPDATE CHECK] Changelog EN: "
+                f"{'YES (' + str(len(changelog_en)) + ' chars)' if changelog_en else 'NO'}"
+            )
+            has_changelog = bool(changelog_ru or changelog_en)
+            if has_changelog and self.admin_id:
+                await self._send_update_preview(
+                    self.admin_id,
+                    {"ru": changelog_ru or "", "en": changelog_en or ""},
+                )
+                print(
+                    f"[UPDATE CHECK] Admin confirmation requested for "
+                    f"{len(self.all_users) or len(self.user_langs)} users"
+                )
+            elif has_changelog:
+                print("[UPDATE CHECK] Changelog generated but no ADMIN_ID set, skipping broadcast")
+            else:
+                print("[UPDATE CHECK] No changelogs to send, skipping notification")
+        except Exception as e:
+            print(f"[UPDATE CHECK] Failed to check/notify updates: {e}")
+            import traceback
+            traceback.print_exc()
 
 
     async def _handle_upload_cmd(self, message: types.Message):
@@ -2322,19 +2573,32 @@ class TelegramWriterBot:
                 await message.answer("❌ Broadcast cancelled")
             return
 
-        # Check for admin confirmation (auto changelog broadcast)
-        if user_id == ADMIN_ID and state == "changelog_confirm":
-            if text.strip().lower() in ("yes", "да", "y", "д"):
-                await message.answer("✅ Starting update broadcast...")
-                sent, failed = await self._process_update_broadcast()
-                await message.answer(f"✅ Update broadcast complete! Sent: {sent}, failed: {failed}")
-            else:
-                await message.answer("❌ Update broadcast cancelled")
-                # Don't delete changelog automatically; let admin confirm later if needed
-            self.user_states[user_id] = "chat"
-            return
-
-        # (old pending_update_changelogs flow removed; now uses pending_changelog + changelog_confirm)
+        # Confirm / edit bilingual changelog (admin)
+        if user_id == ADMIN_ID and state.startswith("update_"):
+            cancel_texts = {"❌ отмена", "отмена", "cancel", "/cancel"}
+            if text.strip().lower() in cancel_texts:
+                self._clear_pending_update(user_id)
+                await message.answer(
+                    "❌ Рассылка обновлений отменена",
+                    reply_markup=get_main_keyboard(lang),
+                )
+                return
+            if state == "update_confirm":
+                await self._handle_update_confirm_input(message, text)
+                return
+            if state in ("update_edit_ru", "update_edit_en"):
+                await self._handle_update_edit_input(message, state, text)
+                return
+        if (
+            user_id == ADMIN_ID
+            and hasattr(self, "pending_update_changelogs")
+            and state == "chat"
+        ):
+            choice = text.strip().lower()
+            if choice in _UPDATE_CONFIRM_YES | _UPDATE_CONFIRM_EDIT | _UPDATE_CONFIRM_NO:
+                self.user_states[user_id] = "update_confirm"
+                await self._handle_update_confirm_input(message, text)
+                return
 
 
         # Check for exact trigger word from keyboard
@@ -2372,14 +2636,6 @@ class TelegramWriterBot:
         if self.bot_last_activity and (now - self.bot_last_activity).total_seconds() > 86400:
             await message.answer(t(lang, "bot_returned"))
 
-        
-        # Show pending changelog to admin only for confirmation
-        if self.pending_changelog and user_id == ADMIN_ID:
-            await message.answer(self.pending_changelog, parse_mode="HTML")
-            # Clear changelog after showing to admin
-            self.pending_changelog = None
-
-        
         # Update bot's last activity timestamp
 
         self.bot_last_activity = now
