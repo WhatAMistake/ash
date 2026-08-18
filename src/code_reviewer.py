@@ -1,42 +1,48 @@
 """
 Code change reviewer for Ash bot.
-Tracks file hashes and generates changelogs on startup.
+
+Tracks file hashes + content snapshots, builds real diffs on startup,
+and asks the LLM only about user-visible changes.
 """
 
-import os
-import json
+from __future__ import annotations
+
+import difflib
 import hashlib
-import re
+import json
 import random
-import subprocess
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime
-# Files to track for changes
+
+# Files to track for user-facing changelog detection
 TRACKED_FILES = [
     "src/telegram_bot.py",
-    "src/writer_bot.py", 
+    "src/writer_bot.py",
     "src/i18n.py",
     "src/writer_rag.py",
     "src/lang_utils.py",
     "src/word_stats.py",
+    "src/code_reviewer.py",
 ]
 
-# Existing commands that should NOT be mentioned as new in changelogs
+# Known bot commands — never announce these as "new"
 EXISTING_COMMANDS = [
     "start", "help", "lang", "switchlang", "reset", "block", "develop",
     "character", "dialogue", "prompt", "idea", "feedback", "style", "roast",
     "praise", "corrector", "editor", "count_me", "stats", "lobster", "pun",
     "xyx", "methodique", "methodichque", "cite", "cite_off", "cite_on",
-    "cite_when", "summary", "cry_baby", "dev_feedback", "done", "confo_enable37", "upload",
-    # Internal functions that should NOT appear in changelog
-    "get_writing_prompt", "generate_idea", "develop_idea", "character_help",
-    "dialogue_help", "methodique_random", "cry_baby_reply", "lobster_love"
+    "cite_when", "summary", "cry_baby", "dev_feedback", "done",
+    "confo_enable37", "upload", "admin", "debug",
 ]
 
+# Caps so prompts stay focused
+MAX_DIFF_CHARS_PER_FILE = 4500
+MAX_TOTAL_DIFF_CHARS = 14000
+MAX_NEW_FILE_CHARS = 2500
 
-# Witty comments for changelog
-WITTY_COMMENTS = [
+WITTY_COMMENTS_RU = [
     "Код, как вино — с каждым обновлением становится лучше.",
     "Баги исправлены, новые баги ещё не обнаружены.",
     "Обновление установлено. Надеюсь, ничего не сломал.",
@@ -44,27 +50,48 @@ WITTY_COMMENTS = [
     "Код обновлён. Если что-то сломалось — это специально.",
 ]
 
+WITTY_COMMENTS_EN = [
+    "Code, like wine — better with every update.",
+    "Bugs fixed. New bugs not yet discovered.",
+    "Update installed. Hopefully I didn't break anything.",
+    "Code rewritten. Old crutches replaced with newer, more elegant ones.",
+    "Code updated. If something broke — that was on purpose.",
+]
 
+# Back-compat alias used by older tests/scripts
+WITTY_COMMENTS = WITTY_COMMENTS_RU
 
 
 def calculate_file_hash(file_path: Path) -> str:
-    """Calculate SHA256 hash of file contents."""
+    """Calculate short SHA256 hash of file contents."""
     try:
-        with open(file_path, 'rb') as f:
+        with open(file_path, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()[:16]
     except Exception:
         return ""
 
 
+def _backup_dir(data_dir: Path) -> Path:
+    return data_dir / "code_backup"
+
+
+def _backup_path(data_dir: Path, rel_path: str) -> Path:
+    # Keep nested paths flat but stable: src/telegram_bot.py -> src_telegram_bot.py
+    return _backup_dir(data_dir) / rel_path.replace("\\", "/").replace("/", "_")
+
+
 def load_stored_hashes(data_dir: Path) -> Dict[str, str]:
     """Load previously stored file hashes."""
     hash_file = data_dir / "code_hashes.json"
-    if hash_file.exists():
-        try:
-            with open(hash_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
+    if not hash_file.exists():
+        return {}
+    try:
+        with open(hash_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        pass
     return {}
 
 
@@ -73,72 +100,38 @@ def save_hashes(data_dir: Path, hashes: Dict[str, str]) -> None:
     hash_file = data_dir / "code_hashes.json"
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
-        with open(hash_file, 'w', encoding='utf-8') as f:
+        with open(hash_file, "w", encoding="utf-8") as f:
             json.dump(hashes, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Failed to save hashes: {e}")
 
 
-def get_last_deploy_tag(project_root: Path) -> Optional[str]:
-    """Get the most recent deploy tag, or None if none exists."""
+def load_file_backup(data_dir: Path, rel_path: str) -> Optional[str]:
+    """Load previous snapshot for a tracked file, if any."""
+    backup_file = _backup_path(data_dir, rel_path)
+    if not backup_file.exists():
+        return None
     try:
-        result = subprocess.run(
-            ["git", "tag", "--list", "--sort=-creatordate", "deploy-*"],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        tags = [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
-        return tags[0] if tags else None
+        return backup_file.read_text(encoding="utf-8")
     except Exception:
         return None
 
 
-def get_git_diff_files(project_root: Path, old_tag: Optional[str]) -> List[Tuple[str, str, str]]:
-    """
-    Get list of changed tracked files between old_tag and HEAD.
-    Returns list of (rel_path, old_hash, new_hash) for changed files.
-    If old_tag is None, treats all tracked files as changed.
-    """
-    changed = []
-    for rel_path in TRACKED_FILES:
-        file_path = project_root / rel_path
-        if not file_path.exists():
-            continue
-
-        current_hash = calculate_file_hash(file_path)
-
-        if old_tag is None:
-            changed.append((rel_path, "", current_hash))
-            continue
-
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only", f"{old_tag}..HEAD", "--", rel_path],
-                cwd=project_root,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            if result.stdout.strip():
-                changed.append((rel_path, old_tag, current_hash))
-        except Exception:
-            pass
-
-    return changed
+def save_file_backup(data_dir: Path, rel_path: str, content: str) -> None:
+    """Save content snapshot used for the next real diff."""
+    backup_file = _backup_path(data_dir, rel_path)
+    try:
+        backup_file.parent.mkdir(parents=True, exist_ok=True)
+        backup_file.write_text(content, encoding="utf-8")
+    except Exception as e:
+        print(f"Failed to save backup for {rel_path}: {e}")
 
 
-def create_deploy_tag(project_root: Path) -> str:
-    """Create a new deploy tag and return it."""
-    tag_name = f"deploy-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
-    subprocess.run(
-        ["git", "tag", tag_name],
-        cwd=project_root,
-        capture_output=True,
-        check=True,
-    )
-    return tag_name
+def read_text_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
 
 
 def get_changed_files(project_root: Path, stored_hashes: Dict[str, str]) -> List[Tuple[str, str, str]]:
@@ -146,221 +139,473 @@ def get_changed_files(project_root: Path, stored_hashes: Dict[str, str]) -> List
     Compare current files with stored hashes.
     Returns list of (filename, old_hash, new_hash) for changed files.
     """
-    changed = []
+    changed: List[Tuple[str, str, str]] = []
     for rel_path in TRACKED_FILES:
         file_path = project_root / rel_path
-        if file_path.exists():
-            current_hash = calculate_file_hash(file_path)
-            old_hash = stored_hashes.get(rel_path, "")
-            if current_hash != old_hash:
-                changed.append((rel_path, old_hash, current_hash))
+        if not file_path.exists():
+            continue
+        current_hash = calculate_file_hash(file_path)
+        old_hash = stored_hashes.get(rel_path, "")
+        if current_hash and current_hash != old_hash:
+            changed.append((rel_path, old_hash, current_hash))
     return changed
 
-def extract_commands_from_code(content: str) -> List[str]:
-    """Extract command names from code content."""
-    commands = []
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 20)] + "\n...[truncated]..."
+
+
+def build_unified_diff(rel_path: str, old_content: str, new_content: str) -> str:
+    """Build a compact unified diff for one file."""
+    old_lines = old_content.splitlines()
+    new_lines = new_content.splitlines()
+
+    if not old_content and new_content:
+        body = _truncate(new_content, MAX_NEW_FILE_CHARS)
+        return f"--- /dev/null\n+++ b/{rel_path}\n@@ new file @@\n{body}"
+
+    if old_content and not new_content:
+        return f"--- a/{rel_path}\n+++ /dev/null\n@@ deleted file @@"
+
+    diff_lines = list(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a/{rel_path}",
+            tofile=f"b/{rel_path}",
+            lineterm="",
+            n=3,
+        )
+    )
+    if not diff_lines:
+        return ""
+
+    diff_text = "\n".join(diff_lines)
+    return _truncate(diff_text, MAX_DIFF_CHARS_PER_FILE)
+
+
+def extract_commands_from_text(content: str) -> List[str]:
+    """Extract command names from code/diff text."""
+    commands: List[str] = []
     patterns = [
-        r'Command\(["\'](/\w+)["\']',
-        r'@self\.dp\.message\(Command\(["\'](\w+)["\']',
+        r'Command\(\s*["\']/?(\w+)["\']',
+        r'@self\.dp\.message\(\s*Command\(\s*["\']/?(\w+)["\']',
         r'async def cmd_(\w+)\(',
+        r'Command\(["\'](\w+)["\']',
     ]
     for pattern in patterns:
-        matches = re.findall(pattern, content)
-        for match in matches:
-            cmd = match if match.startswith('/') else f"/{match}"
-            if cmd not in commands:
+        for match in re.findall(pattern, content):
+            cmd = match.lower().lstrip("/")
+            if cmd and cmd not in commands:
                 commands.append(cmd)
     return commands
 
 
-def analyze_code_changes(project_root: Path, changed_files: List[Tuple[str, str, str]]) -> Dict[str, List[str]]:
-    """Analyze what actually changed in the code."""
-    result = {
-        "new_commands": [],
-        "all_commands": [],
-        "has_changes": False,
-        "changed_files_count": len(changed_files)
-    }
-    
+def extract_new_commands_from_diff(diff_text: str) -> List[str]:
+    """
+    Commands that appear only on added lines of a diff and are not already known.
+    """
+    added_chunks: List[str] = []
+    for line in diff_text.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            added_chunks.append(line[1:])
+    added_text = "\n".join(added_chunks)
+    found = extract_commands_from_text(added_text)
+    known = {c.lower().lstrip("/") for c in EXISTING_COMMANDS}
+    return [c for c in found if c not in known]
+
+
+def collect_change_set(
+    project_root: Path,
+    data_dir: Path,
+    changed_files: List[Tuple[str, str, str]],
+) -> Dict:
+    """
+    Build structured change info with real diffs and new-command hints.
+    """
+    file_diffs: List[Dict[str, str]] = []
+    new_commands: List[str] = []
+    total_chars = 0
+
     for rel_path, old_hash, new_hash in changed_files:
         file_path = project_root / rel_path
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            commands = extract_commands_from_code(content)
-            if commands:
-                result["all_commands"].extend(commands)
-            
-            result["has_changes"] = True
-        except Exception:
-            result["has_changes"] = True
-    
-    # Remove duplicates
-    result["all_commands"] = list(set(result["all_commands"]))
-    return result
-
-
-def get_witty_comment(num_changes: int, lang: str = "ru") -> str:
-    """Get a witty comment."""
-    return random.choice(WITTY_COMMENTS)
-
-
-
-
-def generate_changelog_with_llm(writer_bot, changed_files: List[Tuple[str, str, str]], project_root: Path, lang: str = "ru") -> str:
-    """
-    Use LLM to generate a human-readable changelog based on file changes.
-    """
-    if not changed_files:
-        return ""
-    
-    num_changes = len(changed_files)
-    
-    # Generate content for each changed file
-    diff_sections = []
-    for rel_path, old_hash, new_hash in changed_files:
-        file_path = project_root / rel_path
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            diff_sections.append(f"File: {rel_path}\n{content[:5000]}")
-        except Exception as e:
-            diff_sections.append(f"File: {rel_path}\n[Error: {e}]")
-    
-    diff_content = "\n\n".join(diff_sections)
-    
-    # Known existing commands to prevent hallucination
-    known_cmds = ", ".join(EXISTING_COMMANDS[:12])
-    
-    if lang == "ru":
-        prompt = f"""Ты пишешь changelog для пользователей.
-Пиши ТОЛЬКО о том, что изменилось для ПОЛЬЗОВАТЕЛЯ (новые команды, исправления в ответах, новые темы, исправление багов).
-Игнорируй чисто техническую чепуху: структуру папок, импорты, мелкий рефакторинг.
-
-СТРОГИЕ ПРАВИЛА:
-1) Если есть исправления в логике команд (например, /pun теперь видит контекст, а /summary соблюдает формат) — ОБЯЗАТЕЛЬНО напиши об этом.
-2) Пиши максимально кратко: 1-3 пункта.
-3) НИКАКИХ "внутренних улучшений" и "оптимизаций".
-4) Не используй markdown (звездочки, жирный шрифт).
-
-УЖЕ СУЩЕСТВУЮЩИЕ: {known_cmds}...
-
-Изменённые файлы ({num_changes} шт.):
-
-{diff_content}
-
-Напиши changelog на русском. Будь конкретным и едким, как старый редактор."""
-
-    else:
-        prompt = f"""You are writing release notes for users.
-Write ONLY about changes that are VISIBLE to the user (new commands, fixed responses, new themes).
-Ignore technical fluff: .env loading, folder structure, refactoring, imports, etc.
-
-RULES:
-1. If there are no user-facing changes — return an empty string.
-2. Be extremely brief: 1-2 items max.
-3. NO "internal improvements" or "under the hood" talk.
-4. If a command was fixed (e.g., /pun) — say so: "Fixed /pun command, it now sees context correctly."
-5. No markdown formatting.
-
-Changed files:
-{diff_content}
-
-Write changelog in English. Be specific and cynical."""
-
-    
-    try:
-        if writer_bot and writer_bot.client:
-            response = writer_bot.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[                    {"role": "system", "content": "Ты пишешь краткие notes к релизам. Не придумывай. Будь честным. НЕ используй markdown (звёздочки, жирный шрифт)." if lang == "ru" else "You write brief release notes. Don't hallucinate. Be honest. NO markdown formatting (no asterisks, no bold)."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2,
-                max_tokens=800
-            )            
-            changelog = response.choices[0].message.content.strip()
-            
-            # Add witty comment if changelog is meaningful
-            if changelog and len(changelog) > 10 and "Internal" not in changelog:
-                witty = get_witty_comment(num_changes, lang)
-                return f"{witty}\n\n{changelog}"
+        new_content = read_text_file(file_path) if file_path.exists() else ""
+        old_content = load_file_backup(data_dir, rel_path)
+        if old_content is None:
+            # No snapshot yet for this path: avoid dumping whole file as "changes".
+            if not old_hash:
+                diff_text = (
+                    f"File newly tracked: {rel_path}\n"
+                    f"(no previous snapshot; hash {new_hash})"
+                )
             else:
-                return changelog
+                diff_text = (
+                    f"File changed: {rel_path}\n"
+                    f"(previous snapshot missing; old_hash={old_hash}, new_hash={new_hash})\n"
+                    f"Current head (truncated):\n{_truncate(new_content, 1200)}"
+                )
+        else:
+            diff_text = build_unified_diff(rel_path, old_content, new_content)
+
+        if not diff_text.strip():
+            continue
+
+        remaining = MAX_TOTAL_DIFF_CHARS - total_chars
+        if remaining <= 200:
+            file_diffs.append(
+                {
+                    "path": rel_path,
+                    "old_hash": old_hash,
+                    "new_hash": new_hash,
+                    "diff": f"File changed: {rel_path} (diff omitted — budget exhausted)",
+                }
+            )
+            break
+
+        clipped = _truncate(diff_text, min(MAX_DIFF_CHARS_PER_FILE, remaining))
+        total_chars += len(clipped)
+        file_diffs.append(
+            {
+                "path": rel_path,
+                "old_hash": old_hash,
+                "new_hash": new_hash,
+                "diff": clipped,
+            }
+        )
+        for cmd in extract_new_commands_from_diff(clipped):
+            if cmd not in new_commands:
+                new_commands.append(cmd)
+
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "changed_files_count": len(file_diffs),
+        "new_commands": new_commands,
+        "file_diffs": file_diffs,
+        "has_user_signal": bool(new_commands) or any(
+            _diff_looks_user_facing(item["diff"]) for item in file_diffs
+        ),
+    }
 
 
+def _diff_looks_user_facing(diff_text: str) -> bool:
+    """
+    Cheap heuristic: ignore pure import/comment/whitespace-only diffs.
+    Still lets the LLM decide final user-facing wording.
+    """
+    meaningful = 0
+    for line in diff_text.splitlines():
+        if not (line.startswith("+") or line.startswith("-")):
+            continue
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        body = line[1:].strip()
+        if not body:
+            continue
+        if body.startswith("#") or body.startswith('"""') or body.startswith("'''"):
+            continue
+        if body.startswith("import ") or body.startswith("from "):
+            continue
+        if body.startswith("print(") or body.startswith("logger."):
+            continue
+        meaningful += 1
+        if meaningful >= 2:
+            return True
+    lower = diff_text.lower()
+    if "command(" in lower or "async def cmd_" in lower or "t(lang," in lower:
+        return True
+    return meaningful > 0
+
+
+def get_witty_comment(num_changes: int = 1, lang: str = "ru") -> str:
+    """Get a witty comment based on language."""
+    _ = num_changes  # kept for call-site compatibility
+    if lang == "ru":
+        return random.choice(WITTY_COMMENTS_RU)
+    return random.choice(WITTY_COMMENTS_EN)
+
+
+def _is_empty_changelog(text: str) -> bool:
+    if not text:
+        return True
+    cleaned = text.strip().lower()
+    # Exact no-op answers from the model
+    if cleaned in {"нет", "none", "n/a", "na", "empty", "no", "-"}:
+        return True
+    if len(cleaned) < 8:
+        return True
+    empty_markers = [
+        "нет пользовательских",
+        "нет видимых",
+        "no user-facing",
+        "no user facing",
+        "no visible changes",
+        "no changes",
+        "внутренние улучшения",
+        "internal improvements",
+        "under the hood",
+        "технические изменения",
+        "technical only",
+    ]
+    return any(marker in cleaned for marker in empty_markers)
+
+
+def generate_changelog_with_llm(
+    writer_bot,
+    changed_files: List[Tuple[str, str, str]],
+    project_root: Path,
+    lang: str = "ru",
+    change_set: Optional[Dict] = None,
+) -> str:
+    """
+    Use LLM to generate a human-readable changelog from real diffs.
+    Returns empty string when there is nothing user-visible to announce.
+    """
+    data_dir = project_root / "data"
+    if change_set is None:
+        change_set = collect_change_set(project_root, data_dir, changed_files)
+
+    file_diffs = change_set.get("file_diffs") or []
+    if not file_diffs:
+        return ""
+
+    # If the diff is pure noise and no new commands, skip LLM entirely.
+    if not change_set.get("has_user_signal") and not change_set.get("new_commands"):
+        print("[CHANGELOG] Diff looks non-user-facing; skipping LLM")
+        return ""
+
+    diff_sections = []
+    for item in file_diffs:
+        diff_sections.append(
+            f"### {item['path']} ({item.get('old_hash') or '∅'} → {item.get('new_hash')})\n"
+            f"{item['diff']}"
+        )
+    diff_content = "\n\n".join(diff_sections)
+    new_cmds = ", ".join(f"/{c}" for c in change_set.get("new_commands") or []) or "—"
+    known_cmds = ", ".join(f"/{c}" for c in EXISTING_COMMANDS)
+
+    if lang == "ru":
+        prompt = f"""Ты пишешь краткий changelog для пользователей Telegram-бота — писательского редактора Ash.
+
+Ниже — РЕАЛЬНЫЙ diff (старое → новое). Пиши ТОЛЬКО по этому diff.
+Не додумывай фичи, которых нет в diff.
+
+Правила:
+1) Только изменения, ЗАМЕТНЫЕ пользователю: новые/починенные команды, ответы бота, тексты, режимы, UX.
+2) Игнорируй: рефакторинг, импорты, хеши, логи, внутренние хелперы, переименования без эффекта.
+3) Если пользовательски видимых изменений нет — верни ровно: НЕТ
+4) 1–3 коротких пункта, без вступлений и без markdown (*_#).
+5) Не называй «новой» команду из списка известных, если она лишь правилась.
+6) Если команда реально новая — можно упомянуть.
+7) Тон: конкретный и едкий, как у старого редактора.
+
+Известные команды (не новые сами по себе): {known_cmds}
+Новые команды по diff (подсказка, может быть пусто): {new_cmds}
+
+DIFF:
+{diff_content}
+
+Ответ: либо «НЕТ», либо 1–3 пункта changelog на русском."""
+        system = (
+            "Ты редактор release notes. Только факты из diff. "
+            "Если сомневаешься — ответь НЕТ. Без markdown."
+        )
+    else:
+        prompt = f"""You write a brief changelog for users of Ash, a writing-coach Telegram bot.
+
+Below is a REAL diff (old → new). Write ONLY from this diff.
+Do not invent features that are not in the diff.
+
+Rules:
+1) Only USER-VISIBLE changes: new/fixed commands, bot replies, copy, modes, UX.
+2) Ignore: refactoring, imports, hashes, logs, internal helpers, renames with no effect.
+3) If there are no user-visible changes — return exactly: NONE
+4) 1–3 short bullets, no preamble, no markdown (*_#).
+5) Do not call a command "new" if it only appears in the known list and was merely edited.
+6) Truly new commands may be mentioned.
+7) Tone: specific and cynical, like an old editor.
+
+Known commands (not new by themselves): {known_cmds}
+New commands hinted by diff (may be empty): {new_cmds}
+
+DIFF:
+{diff_content}
+
+Answer: either NONE or 1–3 changelog bullets in English."""
+        system = (
+            "You write release notes. Facts from the diff only. "
+            "If unsure, answer NONE. No markdown."
+        )
+
+    try:
+        if writer_bot and getattr(writer_bot, "client", None):
+            response = writer_bot.client.chat.completions.create(
+                model=writer_bot.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.15,
+                max_tokens=400,
+            )
+            changelog = (response.choices[0].message.content or "").strip()
+
+            if _is_empty_changelog(changelog):
+                return ""
+
+            # Strip accidental fences / labels
+            changelog = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", changelog).strip()
+            if _is_empty_changelog(changelog):
+                return ""
+
+            witty = get_witty_comment(change_set.get("changed_files_count", 1), lang)
+            return f"{witty}\n\n{changelog}"
     except Exception as e:
         print(f"LLM changelog generation failed: {e}")
-    
-    # Fallback: simple message
-    if lang == "ru":
-        return "Внутренние улучшения и исправления."
-    else:
-        return "Internal improvements and fixes."
+
+    # Honest non-LLM fallback: only if we clearly saw new commands
+    new_commands = change_set.get("new_commands") or []
+    if new_commands:
+        witty = get_witty_comment(change_set.get("changed_files_count", 1), lang)
+        if lang == "ru":
+            lines = [witty, ""] + [f"• Новая команда /{c}" for c in new_commands[:5]]
+        else:
+            lines = [witty, ""] + [f"• New command /{c}" for c in new_commands[:5]]
+        return "\n".join(lines)
+
+    # No reliable user-facing signal — stay silent instead of inventing noise
+    return ""
 
 
 def generate_user_friendly_fallback(analysis: Dict, lang: str = "ru") -> str:
-    """Generate a user-friendly changelog without technical details."""
-    num_changes = analysis.get("changed_files_count", 1)
-    
+    """
+    Minimal fallback. Prefer silence over fake 'improvements'.
+    Kept for backward compatibility with older callers/tests.
+    """
+    new_commands = analysis.get("new_commands") or []
+    if not new_commands:
+        return ""
+
+    witty = get_witty_comment(analysis.get("changed_files_count", 1), lang)
     if lang == "ru":
-        witty = get_witty_comment(num_changes, lang)
-        lines = [witty]
-        
-        if analysis["all_commands"]:
-            for cmd in analysis["all_commands"][:5]:
-                lines.append(f"- Доступна команда {cmd}")
-        
-        if len(lines) == 1:
-            lines.append("- Улучшена работа и исправлены ошибки")
+        lines = [witty] + [f"• Новая команда /{c}" for c in new_commands[:5]]
     else:
-        witty = get_witty_comment(num_changes, lang)
-        lines = [witty]
-        
-        if analysis["all_commands"]:
-            for cmd in analysis["all_commands"][:5]:
-                lines.append(f"- Command {cmd} is available")
-        
-        if len(lines) == 1:
-            lines.append("- Improvements and bug fixes")
-
-
-
-    
+        lines = [witty] + [f"• New command /{c}" for c in new_commands[:5]]
     return "\n".join(lines)
 
 
-def check_and_generate_changelog(project_root: Path, writer_bot, admin_id: int, lang: str = "ru", should_save_tag: bool = True) -> Optional[str]:
+def analyze_code_changes(
+    project_root: Path,
+    changed_files: List[Tuple[str, str, str]],
+) -> Dict[str, List[str]]:
+    """
+    Lightweight analysis used by older tooling.
+    Now based on diffs/snapshots when available.
+    """
+    data_dir = project_root / "data"
+    change_set = collect_change_set(project_root, data_dir, changed_files)
+    return {
+        "new_commands": change_set.get("new_commands", []),
+        "all_commands": change_set.get("new_commands", []),
+        "has_changes": bool(change_set.get("file_diffs")),
+        "changed_files_count": change_set.get("changed_files_count", 0),
+    }
+
+
+def collect_current_hashes(project_root: Path) -> Dict[str, str]:
+    current_hashes: Dict[str, str] = {}
+    for rel_path in TRACKED_FILES:
+        file_path = project_root / rel_path
+        if file_path.exists():
+            current_hashes[rel_path] = calculate_file_hash(file_path)
+    return current_hashes
+
+
+def save_current_snapshots(project_root: Path) -> None:
+    """Save content snapshots for all tracked files."""
+    data_dir = project_root / "data"
+    for rel_path in TRACKED_FILES:
+        file_path = project_root / rel_path
+        if not file_path.exists():
+            continue
+        content = read_text_file(file_path)
+        if content:
+            save_file_backup(data_dir, rel_path, content)
+
+
+def save_current_hashes(project_root: Path) -> None:
+    """
+    Calculate and save current file hashes + content snapshots.
+    Call after changelog generation / successful notify path.
+    """
+    data_dir = project_root / "data"
+    current_hashes = collect_current_hashes(project_root)
+    save_hashes(data_dir, current_hashes)
+    save_current_snapshots(project_root)
+    print(
+        f"[HASHES] Saved {len(current_hashes)} file hashes + snapshots to "
+        f"{data_dir / 'code_hashes.json'}"
+    )
+
+
+def check_and_generate_changelog(
+    project_root: Path,
+    writer_bot,
+    admin_id: int,
+    lang: str = "ru",
+    should_save_hashes: bool = True,
+) -> Optional[str]:
     """
     Main entry point: check for changes and generate changelog.
-    Returns changelog text if changes detected, None otherwise.
+    Returns changelog text if user-visible changes detected, None otherwise.
 
-    Uses git deploy tags to track changes between deployments.
-    Creates a new deploy-* tag after successful changelog generation.
-
-    Args:
-        project_root: Path to project root
-        writer_bot: WriterBot instance for LLM calls
-        admin_id: Admin user ID (for reference, not used in this function)
-        lang: Language code (ru/en)
-        should_save_tag: If True, creates a new deploy tag after generating changelog.
-                         Set to False when testing or when you want to create tag
-                         manually after confirming notifications were sent.
+    Hashes/snapshots are saved only when should_save_hashes=True.
+    Startup path should pass False, generate RU+EN, then call save_current_hashes()
+    once if either language produced a changelog (or after baselining).
     """
+    _ = admin_id  # reserved for callers / future per-admin behavior
 
     try:
-        old_tag = get_last_deploy_tag(project_root)
-        changed_files = get_git_diff_files(project_root, old_tag)
+        data_dir = project_root / "data"
+        stored_hashes = load_stored_hashes(data_dir)
 
-        if not changed_files:
+        # First run / empty cache: baseline silently, do not invent a release.
+        if not stored_hashes:
+            print("[CHANGELOG] No baseline hashes — saving baseline, no changelog")
+            save_current_hashes(project_root)
             return None
 
-        changelog = generate_changelog_with_llm(writer_bot, changed_files, project_root, lang)
+        changed_files = get_changed_files(project_root, stored_hashes)
+        print(f"[CHANGELOG] Stored hashes: {len(stored_hashes)} files")
+        print(f"[CHANGELOG] Changed files: {[c[0] for c in changed_files]}")
 
-        if should_save_tag:
-            create_deploy_tag(project_root)
+        if not changed_files:
+            print("[CHANGELOG] No changes detected")
+            return None
 
+        change_set = collect_change_set(project_root, data_dir, changed_files)
+        print(
+            f"[CHANGELOG] Diff set: {change_set.get('changed_files_count')} files, "
+            f"new_commands={change_set.get('new_commands')}, "
+            f"user_signal={change_set.get('has_user_signal')}"
+        )
+
+        print(f"[CHANGELOG] Generating changelog for {len(changed_files)} changed files...")
+        changelog = generate_changelog_with_llm(
+            writer_bot,
+            changed_files,
+            project_root,
+            lang,
+            change_set=change_set,
+        )
+
+        if should_save_hashes:
+            save_current_hashes(project_root)
+            print("[CHANGELOG] Hashes+snapshots saved (should_save_hashes=True)")
+
+        if not changelog or not changelog.strip():
+            return None
         return changelog
 
     except Exception as e:
