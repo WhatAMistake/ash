@@ -11,3 +11,5 @@ backup_src/
 user_prefs.json
 .env
 user_prefs
+.kodik/
+**/.kodik/
