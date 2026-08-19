@@ -7,6 +7,11 @@ import os
 from typing import Optional, List, Dict
 from dataclasses import dataclass
 
+try:
+    from llm_completion import create_chat_completion, visible_completion_text
+except ImportError:
+    from src.llm_completion import create_chat_completion, visible_completion_text
+
 @dataclass
 class TextGenerationResult:
     content: str
@@ -61,13 +66,14 @@ class TextGenerator:
         ]
         
         try:
-            response = self.client.chat.completions.create(
+            response = create_chat_completion(
+                self.client,
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
             )
-            content = response.choices[0].message.content or ""
+            content = visible_completion_text(response)
             return TextGenerationResult(content=content, model=self.model)
         except Exception as e:
             return TextGenerationResult(content=f"Error: {e}", model="error")

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from i18n import t
 from lang_utils import detect_language
+from llm_completion import create_chat_completion, visible_completion_text
 
 load_dotenv()
 
@@ -365,14 +366,14 @@ class WriterBot:
             temporary_system_instruction = clean_text_instr.strip()
         messages = self._build_messages(user_input, extra_system=temporary_system_instruction, command=command)
         try:
-            # Use main model (deepseek-v3.2) for specific tasks
-            r = self.client.chat.completions.create(
+            r = create_chat_completion(
+                self.client,
                 model=self.model,
                 messages=messages,
                 temperature=0.7,
                 max_tokens=1000,
             )
-            return r.choices[0].message.content or ""
+            return visible_completion_text(r)
         except Exception as e:
             return f"Error: {e}"
 
@@ -383,14 +384,14 @@ class WriterBot:
         clean_text_instr = "ВАЖНО: Только чистый текст. Без звёздочек, без смайликов, без декоративных элементов, без эмодзи, без markdown-форматирования." if self.language == "ru" else "IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no markdown formatting."
         messages = self._build_messages(user_input, extra_system=clean_text_instr)
         try:
-            # Use chat_model (gpt-4o-mini) for regular chat
-            r = self.client.chat.completions.create(
+            r = create_chat_completion(
+                self.client,
                 model=self.chat_model,
                 messages=messages,
                 temperature=0.7,
                 max_tokens=1000,
             )
-            reply = r.choices[0].message.content or ""
+            reply = visible_completion_text(r)
             self.history.append(Message(role="user", content=user_input))
             self.history.append(Message(role="assistant", content=reply))
             self.messages_since_summary += 2
@@ -410,7 +411,8 @@ class WriterBot:
         clean_suffix = " Без эмодзи, без звёздочек, без декоративных элементов." if self.language == "ru" else " No emojis, no asterisks, no decorative elements."
         prompt = f"Summarize this writing-coach session in under 150 words (themes, goals, progress). Use {self.language}.\n\n{history_text}"
         try:
-            r = self.client.chat.completions.create(
+            r = create_chat_completion(
+                self.client,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You summarize writing sessions briefly." + clean_suffix},
@@ -419,7 +421,7 @@ class WriterBot:
                 temperature=0.3,
                 max_tokens=300,
             )
-            self.session_summary = r.choices[0].message.content
+            self.session_summary = visible_completion_text(r) or None
             self.messages_since_summary = 0
         except Exception as e:
             print(f"Summarization error: {e}")
@@ -660,7 +662,8 @@ class WriterBot:
         instr += clean_suffix
         
         try:
-            r = self.client.chat.completions.create(
+            r = create_chat_completion(
+                self.client,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": instr},
@@ -669,7 +672,7 @@ class WriterBot:
                 temperature=0.1, # Low temp for precision
                 max_tokens=min(8000, max(2000, len(text) // 2)),
             )
-            result = (r.choices[0].message.content or "").strip()
+            result = visible_completion_text(r)
             return result + truncation_msg if was_truncated else result
         except Exception as e:
             return f"Error: {e}"
@@ -782,13 +785,14 @@ Instruction: {base_instr}"""
         ]
         
         try:
-            r = self.client.chat.completions.create(
+            r = create_chat_completion(
+                self.client,
                 model=self.model,
                 messages=messages,
                 temperature=0.2,  # Lower temperature to reduce hallucination
                 max_tokens=1000,
             )
-            result = r.choices[0].message.content or ""
+            result = visible_completion_text(r)
             return result + truncation_msg if was_truncated else result
         except Exception as e:
             return f"Error: {e}"
@@ -860,13 +864,14 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             ]
             
             # Call LLM
-            r = self.client.chat.completions.create(
+            r = create_chat_completion(
+                self.client,
                 model=self.model,
                 messages=messages,
                 temperature=0.7,
                 max_tokens=400,
             )
-            content = r.choices[0].message.content or ""
+            content = visible_completion_text(r)
             
             # Add author and book citation at the end
             # Translate known authors and books to English if needed
@@ -952,7 +957,8 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             try:
                 lang_prompt = "на русском языке" if self.language == "ru" else "in English"
                 clean_suffix = " No emojis, no asterisks, no decorative elements." if self.language != "ru" else " Без эмодзи, без звёздочек, без декоративных элементов."
-                r = self.client.chat.completions.create(
+                r = create_chat_completion(
+                    self.client,
                     model=self.model,
                     messages=[
                         {"role": "system", "content": f"You output a single short, poignant sentence that sounds like a line from a writer's diary {lang_prompt}. Then a dash and the writer's name. Example: 'The blank page is a mirror — Kafka.' Output only that one line, no quotes or extra text.{clean_suffix}"},
@@ -961,7 +967,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                     temperature=0.9,
                     max_tokens=150,
                 )
-                raw = (r.choices[0].message.content or "").strip()
+                raw = visible_completion_text(r)
                 if " — " in raw:
                     quote, writer = raw.rsplit(" — ", 1)
                     return (quote.strip(), writer.strip())
@@ -1133,7 +1139,8 @@ Bad examples (avoid): "coffee — philosophical awakening", "deadline — tempor
 
 Output ONLY the pun, no explanation.""" + clean_suffix
         try:
-            r = self.client.chat.completions.create(
+            r = create_chat_completion(
+                self.client,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": instr},
@@ -1142,7 +1149,7 @@ Output ONLY the pun, no explanation.""" + clean_suffix
                 temperature=0.4,  # Lower temperature for more controlled output
                 max_tokens=50,    # Shorter response
             )
-            result = (r.choices[0].message.content or "No pun today.").strip()
+            result = visible_completion_text(r) or "No pun today."
             # Clean up quotes and limit length
             result = result.strip('"\'').split('\n')[0][:100]
             return result
@@ -1189,7 +1196,8 @@ Requirements for the new prompt:
 Output ONLY the prompt itself, no quotes around it.""" + clean_suffix
         
         try:
-            r = self.client.chat.completions.create(
+            r = create_chat_completion(
+                self.client,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": instr},
@@ -1198,7 +1206,7 @@ Output ONLY the prompt itself, no quotes around it.""" + clean_suffix
                 temperature=0.9,
                 max_tokens=200,
             )
-            result = (r.choices[0].message.content or "").strip()
+            result = visible_completion_text(r)
             # Clean up quotes if LLM added them
             result = result.strip('"\'')
             return result if result else self._local_random_prompt()

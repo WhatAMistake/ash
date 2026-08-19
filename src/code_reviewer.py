@@ -16,6 +16,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from llm_completion import (
+    create_chat_completion,
+    extract_completion_text,
+    strip_think_tags,
+)
+
 # Files to track for user-facing changelog detection
 TRACKED_FILES = [
     "src/telegram_bot.py",
@@ -351,18 +357,6 @@ def _is_empty_changelog(text: str) -> bool:
     return any(marker in cleaned for marker in empty_markers)
 
 
-_THINK_TAG_RE = re.compile(
-    r"<(think|thinking|thought|reasoning)\b[^>]*>.*?</\1>",
-    re.DOTALL | re.IGNORECASE,
-)
-_THINK_OPEN_RE = re.compile(
-    r"<(think|thinking|thought|reasoning)\b[^>]*>[\s\S]*",
-    re.IGNORECASE,
-)
-_THINK_ALT_RE = re.compile(
-    r"(?:\[/?think\]|\[/thinking\]|◁/?think▷)",
-    re.IGNORECASE,
-)
 _ANSWER_MARKER_RE = re.compile(
     r"(?is)(?:^|\n)\s*(?:"
     r"final\s+answer|answer|changelog|итоговый\s+changelog|итог|итого|ответ"
@@ -390,28 +384,7 @@ MAX_CHANGELOG_CHARS = 420
 
 def _extract_completion_text(response) -> str:
     """Take only the visible assistant text. Never include reasoning fields."""
-    try:
-        message = response.choices[0].message
-    except Exception:
-        return ""
-
-    content = getattr(message, "content", None)
-    if content is None and isinstance(message, dict):
-        content = message.get("content")
-
-    if isinstance(content, list):
-        parts = []
-        for part in content:
-            if isinstance(part, str):
-                parts.append(part)
-            elif isinstance(part, dict):
-                part_type = str(part.get("type") or "").lower()
-                if part_type in {"thinking", "reasoning", "thought"}:
-                    continue
-                parts.append(str(part.get("text") or part.get("content") or ""))
-        content = "".join(parts)
-
-    return (content or "").strip()
+    return extract_completion_text(response)
 
 
 def _strip_model_thoughts(text: str) -> str:
@@ -419,10 +392,7 @@ def _strip_model_thoughts(text: str) -> str:
     if not text:
         return ""
 
-    cleaned = text.replace("\r\n", "\n")
-    cleaned = _THINK_TAG_RE.sub("", cleaned)
-    cleaned = _THINK_OPEN_RE.sub("", cleaned)
-    cleaned = _THINK_ALT_RE.sub("", cleaned)
+    cleaned = strip_think_tags(text)
 
     marker = _ANSWER_MARKER_RE.search(cleaned)
     if marker:
@@ -579,7 +549,8 @@ Return only the finished bullets or NONE. No reasoning."""
 
     try:
         if writer_bot and getattr(writer_bot, "client", None):
-            response = writer_bot.client.chat.completions.create(
+            response = create_chat_completion(
+                writer_bot.client,
                 model=writer_bot.model,
                 messages=[
                     {"role": "system", "content": system},

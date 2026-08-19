@@ -180,3 +180,6 @@ def test_generate_changelog_sanitizes_model_output():
     assert "Help text is clearer" in result
     assert "Writing prompts are easier to start" in result
     assert result.count("•") == 2
+    create_kwargs = client.chat.completions.create.call_args.kwargs
+    assert create_kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+    assert create_kwargs["extra_body"]["reasoning_effort"] == "none"
