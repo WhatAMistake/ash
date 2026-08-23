@@ -151,26 +151,6 @@ SECRETARY_ENABLED = _parse_bool_env(os.getenv("SECRETARY_ENABLED"), default=Fals
 print(f"DEBUG: SECRETARY_ENABLED = {SECRETARY_ENABLED}")
 
 
-def _parse_positive_number_env(raw: Optional[str], default: float) -> float:
-    if raw is None or not str(raw).strip():
-        return default
-    try:
-        value = float(str(raw).strip())
-    except ValueError:
-        print(f"WARNING: failed to parse SECRETARY_HUMAN_TAKEOVER_HOURS={raw!r}; using {default}")
-        return default
-    if value <= 0:
-        print(f"WARNING: SECRETARY_HUMAN_TAKEOVER_HOURS must be > 0; using {default}")
-        return default
-    return value
-
-
-SECRETARY_HUMAN_TAKEOVER_HOURS = _parse_positive_number_env(
-    os.getenv("SECRETARY_HUMAN_TAKEOVER_HOURS"),
-    default=12.0,
-)
-print(f"DEBUG: SECRETARY_HUMAN_TAKEOVER_HOURS = {SECRETARY_HUMAN_TAKEOVER_HOURS}")
-
 MAX_SECRETARY_RESPONSE_CHARS = 700
 SECRETARY_ALERT_COOLDOWN_MINUTES = 10
 SECRETARY_FALLBACK_RU = (
@@ -297,7 +277,6 @@ class TelegramWriterBot:
         self.sessions: dict[int, WriterBot] = {}
         self.secretary_sessions: dict[tuple[str, int], WriterBot] = {}
         self.business_connections: dict[str, object] = {}
-        self.secretary_human_takeover_until: dict[tuple[str, int], datetime] = {}
         self.secretary_last_alert_at: dict[tuple[str, int], datetime] = {}
         self.user_langs: dict[int, str] = {}
         self.user_states: dict[int, str] = {}
@@ -674,11 +653,6 @@ class TelegramWriterBot:
             for key, sess in self.secretary_sessions.items()
             if key[0] != business_connection_id
         }
-        self.secretary_human_takeover_until = {
-            key: until
-            for key, until in self.secretary_human_takeover_until.items()
-            if key[0] != business_connection_id
-        }
         self.secretary_last_alert_at = {
             key: when
             for key, when in self.secretary_last_alert_at.items()
@@ -749,28 +723,6 @@ class TelegramWriterBot:
         from_user = message.from_user
         return from_user is not None and from_user.id == owner_id
 
-    def _secretary_chat_key(self, connection_id: str, chat_id: int) -> tuple[str, int]:
-        return (connection_id, chat_id)
-
-    def _pause_secretary_for_human_takeover(self, connection_id: str, chat_id: int) -> None:
-        pause_until = datetime.now() + timedelta(hours=SECRETARY_HUMAN_TAKEOVER_HOURS)
-        self.secretary_human_takeover_until[(connection_id, chat_id)] = pause_until
-        print(
-            f"Secretary paused: human takeover, chat_id={chat_id}, until={pause_until.isoformat(timespec='minutes')}"
-        )
-
-    def _secretary_human_takeover_active(self, connection_id: str, chat_id: int) -> bool:
-        key = self._secretary_chat_key(connection_id, chat_id)
-        pause_until = self.secretary_human_takeover_until.get(key)
-        if pause_until is None:
-            return False
-        if datetime.now() < pause_until:
-            print(f"Secretary skipped: human takeover active, chat_id={chat_id}")
-            return True
-        del self.secretary_human_takeover_until[key]
-        print(f"Secretary resumed after human takeover: chat_id={chat_id}")
-        return False
-
     def _secretary_language(self, text: str) -> str:
         try:
             code, _ = detect_language(text)
@@ -839,7 +791,7 @@ class TelegramWriterBot:
         if urgency not in {"urgent", "critical"} or not ADMIN_ID:
             return
 
-        key = self._secretary_chat_key(connection_id, message.chat.id)
+        key = (connection_id, message.chat.id)
         now = datetime.now()
         last_alert = self.secretary_last_alert_at.get(key)
         if last_alert and now - last_alert < timedelta(minutes=SECRETARY_ALERT_COOLDOWN_MINUTES):
@@ -961,16 +913,12 @@ class TelegramWriterBot:
         print(f"Secretary message received: chat_id={chat_id}")
 
         if self._is_owner_business_message(message, owner_id):
-            self._pause_secretary_for_human_takeover(conn_id, chat_id)
             return
 
         if self._is_business_bot_message(message):
             return
 
         if message.from_user is None:
-            return
-
-        if self._secretary_human_takeover_active(conn_id, chat_id):
             return
 
         if not self._business_can_reply(connection):
