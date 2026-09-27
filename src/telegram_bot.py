@@ -173,8 +173,8 @@ Answer in the same language as the correspondent.
 
 IDENTITY
 At the beginning of a new conversation, briefly introduce yourself when it fits naturally.
-RU example: "Я Эш, ИИ-секретарь Никиты."
-EN example: "I'm Ash, the AI secretary for Nichita."
+Introduce yourself as the account owner's AI secretary.
+Owner name (may be empty; do not invent a name): __SECRETARY_OWNER_NAME__
 If asked who or what you are, answer directly and do not hide that you are an AI.
 Do not repeatedly re-introduce yourself once the conversation is underway.
 
@@ -670,7 +670,8 @@ class TelegramWriterBot:
                 use_rag=False,
                 language=language,
             )
-            sess.system_prompt = SECRETARY_SYSTEM_PROMPT
+            sess.system_prompt = SECRETARY_SYSTEM_PROMPT.replace(
+                "__SECRETARY_OWNER_NAME__", os.getenv("SECRETARY_OWNER_NAME", ""))
             # WriterBot's generic session summarizer is writing-coach-specific; do not let it pollute secretary context.
             sess.summarize_history = False
             self.secretary_sessions[key] = sess
@@ -1732,13 +1733,18 @@ class TelegramWriterBot:
             return True, text
             
         # Check if bot is mentioned
-        if message.entities:
-            for entity in message.entities:
+        entities = message.entities if message.text else message.caption_entities
+        if entities:
+            original = message.text or message.caption or ""
+            utf16 = original.encode("utf-16-le")
+            for entity in entities:
                 if entity.type == "mention":
-                    mention = text[entity.offset:entity.offset + entity.length]
+                    start = entity.offset * 2
+                    end = (entity.offset + entity.length) * 2
+                    mention = utf16[start:end].decode("utf-16-le")
                     if self.bot_username and mention.lower() == f"@{self.bot_username.lower()}":
                         # Remove mention from text
-                        clean_text = text[:entity.offset] + text[entity.offset + entity.length:]
+                        clean_text = (utf16[:start] + utf16[end:]).decode("utf-16-le")
                         return True, clean_text.strip()
         
         # Check if replying to bot's message
@@ -2378,7 +2384,7 @@ class TelegramWriterBot:
             return True
         wb = self._get_writer_bot(user_id)
         instr = t(lang, instr_key)
-        response = await self._run_writer(wb.generate_response, 
+        response = await self._run_writer(wb.generate_response,
             full_text,
             temporary_system_instruction=instr,
             command="summary"
@@ -2944,7 +2950,7 @@ class TelegramWriterBot:
                     f"Answer their question while maintaining the same perspective."
                 )
             
-            response = await self._run_writer(wb.generate_response, 
+            response = await self._run_writer(wb.generate_response,
                 t(lang, "rag_user_turn", sources=analyzed_text[:500], request=text),
                 temporary_system_instruction=discussion_instr
             )

@@ -91,6 +91,20 @@ def test_guard_routing_boundaries():
     assert not any('secretary' in name or 'business' in name or 'admin' in name for name in guarded)
 
 
+@pytest.mark.parametrize('caption', [False, True])
+def test_mention_offsets_after_emoji_and_leading_whitespace(caption):
+    bot = handler_class('_should_respond_in_group')()
+    bot.group_chats_enabled = True
+    bot.bot_username = 'ash_bot'
+    bot.bot_user_id = 123
+    original = '  😀 @Ash_bot hello'
+    entity = NS(type='mention', offset=5, length=8)
+    message = NS(text=None if caption else original, caption=original if caption else None,
+        entities=None if caption else [entity], caption_entities=[entity] if caption else None,
+        chat=NS(type='group'), reply_to_message=None)
+    assert bot._should_respond_in_group(message) == (True, '😀  hello')
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('operation,name', COMMANDS[4:])
 async def test_document_guard_preserves_pending_text(operation, name):

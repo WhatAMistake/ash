@@ -3,6 +3,7 @@ Ash — bot for writers: creative block, ideas, exercises, feedback.
 """
 
 import os
+import logging
 import json
 import random
 from pathlib import Path
@@ -329,6 +330,13 @@ class WriterBot:
             ],
         }
 
+    def _rag_context(self, query: str, **kwargs) -> str:
+        try:
+            return self.rag.get_context_for_query(query, **kwargs)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("RAG unavailable type=%s", type(exc).__name__)
+            return ""
+
     def _main_system_prompt(self) -> str:
         if not self.summarize_history:  # Secretary has its own JSON output contract.
             return self.system_prompt
@@ -341,7 +349,7 @@ class WriterBot:
         if extra_system:
             messages.append({"role": "system", "content": extra_system})
         if context is None and self.rag and self.use_rag:
-            context = self.rag.get_context_for_query(user_input, max_chunks=3, command=command)
+            context = self._rag_context(user_input, max_chunks=3, command=command)
         if include_history and self.session_summary:
             messages.append({"role": "user", "content": t(
                 self.language, "session_summary", summary=self.session_summary)})
@@ -732,13 +740,13 @@ class WriterBot:
                 "Blake Snyder save the cat beats"
             ]
             for query in author_queries:
-                ctx = self.rag.get_context_for_query(query, max_chunks=1, command=None)
+                ctx = self._rag_context(query, max_chunks=1, command=None)
                 if ctx:
                     diverse_contexts.append(ctx)
         
         # If no diverse contexts, use whatever is available from regular RAG
         if not diverse_contexts and self.rag and self.use_rag:
-            ctx = self.rag.get_context_for_query(text_or_idea, max_chunks=3, command="methodique")
+            ctx = self._rag_context(text_or_idea, max_chunks=3, command="methodique")
             if ctx:
                 diverse_contexts = [ctx]
         

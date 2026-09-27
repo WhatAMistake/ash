@@ -206,6 +206,8 @@ class WriterRAG:
             chunks_to_search = self.craft_chunks
         elif category == "style":
             chunks_to_search = self.style_chunks
+        elif category == "editorial":
+            chunks_to_search = self.editorial_chunks
         
         for chunk in chunks_to_search:
             text = chunk.get("text", "")

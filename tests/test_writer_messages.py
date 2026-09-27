@@ -99,6 +99,16 @@ def test_methodique_sources_are_user_data(monkeypatch):
     assert 'sources:Stephen' not in calls[0][1]['content']
 
 
+def test_rag_failure_preserves_reply_and_hides_body(monkeypatch, caplog):
+    wb = writer()
+    def broken(*args, **kwargs):
+        raise RuntimeError('PRIVATE TEXT')
+    wb.rag.get_context_for_query = broken
+    messages = wb._build_messages('request')
+    assert messages[-1]['content'] == 'request'
+    assert 'RuntimeError' in caplog.text and 'PRIVATE' not in caplog.text
+
+
 def test_client_timeout_configuration(monkeypatch):
     import openai
     seen = {}
