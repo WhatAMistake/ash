@@ -108,7 +108,9 @@ class WriterBot:
     def _init_llm(self):
         try:
             from openai import OpenAI
-            self.client = OpenAI(api_key=self.api_key, base_url=self.api_base)
+            self.client = OpenAI(api_key=self.api_key, base_url=self.api_base,
+                timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "60")),
+                max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")))
             print(f"LLM client initialized: {self.model}")
         except ImportError:
             print("openai not installed. pip install openai")

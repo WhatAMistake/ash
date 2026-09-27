@@ -716,5 +716,5 @@ def check_and_generate_changelog(
         return changelog
 
     except Exception as e:
-        print(f"Changelog generation error: {e}")
-        raise
+        log_completion_error(e)
+        return None
