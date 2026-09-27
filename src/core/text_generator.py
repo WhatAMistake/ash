@@ -8,9 +8,9 @@ from typing import Optional, List, Dict
 from dataclasses import dataclass
 
 try:
-    from llm_completion import create_chat_completion, visible_completion_text
+    from llm_completion import create_chat_completion, visible_completion_text, log_completion_error
 except ImportError:
-    from src.llm_completion import create_chat_completion, visible_completion_text
+    from src.llm_completion import create_chat_completion, visible_completion_text, log_completion_error
 
 @dataclass
 class TextGenerationResult:
@@ -68,6 +68,7 @@ class TextGenerator:
         try:
             response = create_chat_completion(
                 self.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
@@ -76,7 +77,8 @@ class TextGenerator:
             content = visible_completion_text(response)
             return TextGenerationResult(content=content, model=self.model)
         except Exception as e:
-            return TextGenerationResult(content=f"Error: {e}", model="error")
+            log_completion_error(e)
+            return TextGenerationResult(content="Generation unavailable. Please try again later.", model="error")
 
     def generate_story_start(self, idea: str) -> str:
         """Generate a short story start based on an idea."""

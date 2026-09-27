@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from i18n import t
 from lang_utils import detect_language
-from llm_completion import create_chat_completion, visible_completion_text
+from llm_completion import create_chat_completion, visible_completion_text, log_completion_error
 
 load_dotenv()
 
@@ -368,6 +368,7 @@ class WriterBot:
         try:
             r = create_chat_completion(
                 self.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=self.model,
                 messages=messages,
                 temperature=0.7,
@@ -375,7 +376,8 @@ class WriterBot:
             )
             return visible_completion_text(r)
         except Exception as e:
-            return f"Error: {e}"
+            log_completion_error(e)
+            return "Error: " + t(self.language, "error_llm")
 
     def chat(self, user_input: str) -> str:
         if not self.client:
@@ -386,6 +388,7 @@ class WriterBot:
         try:
             r = create_chat_completion(
                 self.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=self.chat_model,
                 messages=messages,
                 temperature=0.7,
@@ -399,7 +402,8 @@ class WriterBot:
                 self._maybe_summarize()
             return reply
         except Exception as e:
-            return f"Error: {e}"
+            log_completion_error(e)
+            return "Error: " + t(self.language, "error_llm")
 
     def _maybe_summarize(self):
         if not self.client or len(self.history) < 10:
@@ -413,6 +417,7 @@ class WriterBot:
         try:
             r = create_chat_completion(
                 self.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You summarize writing sessions briefly." + clean_suffix},
@@ -424,7 +429,7 @@ class WriterBot:
             self.session_summary = visible_completion_text(r) or None
             self.messages_since_summary = 0
         except Exception as e:
-            print(f"Summarization error: {e}")
+            log_completion_error(e)
 
     def handle_block(self, user_message: str) -> str:
         # Define all 12 tips and randomly select 2 to ensure variety
@@ -664,6 +669,7 @@ class WriterBot:
         try:
             r = create_chat_completion(
                 self.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=self.model,
                 messages=[
                     {"role": "system", "content": instr},
@@ -675,7 +681,8 @@ class WriterBot:
             result = visible_completion_text(r)
             return result + truncation_msg if was_truncated else result
         except Exception as e:
-            return f"Error: {e}"
+            log_completion_error(e)
+            return "Error: " + t(self.language, "error_llm")
 
     # --- Editor: clichés and bad expressions, 1–3 alternatives ---
     def edit_text(self, text: str) -> str:
@@ -787,6 +794,7 @@ Instruction: {base_instr}"""
         try:
             r = create_chat_completion(
                 self.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=self.model,
                 messages=messages,
                 temperature=0.2,  # Lower temperature to reduce hallucination
@@ -795,7 +803,8 @@ Instruction: {base_instr}"""
             result = visible_completion_text(r)
             return result + truncation_msg if was_truncated else result
         except Exception as e:
-            return f"Error: {e}"
+            log_completion_error(e)
+            return "Error: " + t(self.language, "error_llm")
 
     # --- Methodique Random: random RAG from craft books when user sends just "Методичка" ---
     def methodique_random(self) -> str:
@@ -866,6 +875,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             # Call LLM
             r = create_chat_completion(
                 self.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=self.model,
                 messages=messages,
                 temperature=0.7,
@@ -911,7 +921,8 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             return content + citation
             
         except Exception as e:
-            return f"Error: {e}"
+            log_completion_error(e)
+            return "Error: " + t(self.language, "error_llm")
 
     # --- Cite: random writer's diary citation + writer name ---
     def cite(self) -> tuple[str, str]:
@@ -959,6 +970,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                 clean_suffix = " No emojis, no asterisks, no decorative elements." if self.language != "ru" else " Без эмодзи, без звёздочек, без декоративных элементов."
                 r = create_chat_completion(
                     self.client,
+                    reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                     model=self.model,
                     messages=[
                         {"role": "system", "content": f"You output a single short, poignant sentence that sounds like a line from a writer's diary {lang_prompt}. Then a dash and the writer's name. Example: 'The blank page is a mirror — Kafka.' Output only that one line, no quotes or extra text.{clean_suffix}"},
@@ -974,7 +986,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                 if raw:
                     return (raw, "Unknown")
             except Exception as e:
-                print(f"Cite LLM error: {e}")
+                log_completion_error(e)
         if self.language == "ru":
             return ("Чистый лист — это зеркало", "Неизвестно")
         return ("The blank page is a mirror", "Unknown")
@@ -1141,6 +1153,7 @@ Output ONLY the pun, no explanation.""" + clean_suffix
         try:
             r = create_chat_completion(
                 self.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=self.model,
                 messages=[
                     {"role": "system", "content": instr},
@@ -1154,7 +1167,8 @@ Output ONLY the pun, no explanation.""" + clean_suffix
             result = result.strip('"\'').split('\n')[0][:100]
             return result
         except Exception as e:
-            return f"Error: {e}"
+            log_completion_error(e)
+            return "Error: " + t(self.language, "error_llm")
 
     # --- Generate new prompt via LLM ---
     def generate_fresh_prompt(self) -> str:
@@ -1198,6 +1212,7 @@ Output ONLY the prompt itself, no quotes around it.""" + clean_suffix
         try:
             r = create_chat_completion(
                 self.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=self.model,
                 messages=[
                     {"role": "system", "content": instr},

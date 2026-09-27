@@ -6,6 +6,7 @@ and asks the LLM only about user-visible changes.
 """
 
 from __future__ import annotations
+import os
 
 import difflib
 import hashlib
@@ -18,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 
 from llm_completion import (
     create_chat_completion,
+    log_completion_error,
     extract_completion_text,
     strip_think_tags,
 )
@@ -551,6 +553,7 @@ Return only the finished bullets or NONE. No reasoning."""
         if writer_bot and getattr(writer_bot, "client", None):
             response = create_chat_completion(
                 writer_bot.client,
+                reasoning_policy=os.getenv("LLM_REASONING_POLICY", "off"),
                 model=writer_bot.model,
                 messages=[
                     {"role": "system", "content": system},
@@ -566,7 +569,7 @@ Return only the finished bullets or NONE. No reasoning."""
             witty = get_witty_comment(change_set.get("changed_files_count", 1), lang)
             return f"{witty}\n\n{changelog}"
     except Exception as e:
-        print(f"LLM changelog generation failed: {e}")
+        log_completion_error(e)
 
     # Honest non-LLM fallback: only if we clearly saw new commands
     new_commands = change_set.get("new_commands") or []
