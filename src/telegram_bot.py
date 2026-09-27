@@ -657,7 +657,7 @@ class TelegramWriterBot:
             )
             sess.system_prompt = SECRETARY_SYSTEM_PROMPT
             # WriterBot's generic session summarizer is writing-coach-specific; do not let it pollute secretary context.
-            sess.summary_trigger_count = 10_000
+            sess.summarize_history = False
             self.secretary_sessions[key] = sess
         elif sess.language != language:
             sess.language = language
@@ -2879,19 +2879,17 @@ class TelegramWriterBot:
                 base_instr = t(lang, instr_key)
                 discussion_instr = (
                     f"{base_instr}\n\n"
-                    f"Original text analyzed: {analyzed_text[:500]}...\n"
                     f"User is asking about your previous analysis. "
                     f"Answer their question while maintaining the same analytical perspective."
                 )
             else:
                 discussion_instr = (
-                    f"Original text: {analyzed_text[:500]}...\n"
                     f"User is asking about your previous response. "
                     f"Answer their question while maintaining the same perspective."
                 )
             
             response = await self._run_writer(wb.generate_response, 
-                f"User question: {text}",
+                t(lang, "rag_user_turn", sources=analyzed_text[:500], request=text),
                 temporary_system_instruction=discussion_instr
             )
             

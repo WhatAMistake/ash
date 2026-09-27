@@ -402,6 +402,7 @@ def create_chat_completion(
         _warn_retry(provider)
         retried = True
         raw = _sdk_completion(client, _fallback_payload(payload))
+    log_cache_usage(raw)
     return visible_text(raw, provider=provider, retried_without_reasoning=retried)
 
 
@@ -464,6 +465,16 @@ def log_completion_error(exc: Exception) -> None:
     code = code if isinstance(code, str) and re.fullmatch(r"[a-zA-Z0-9_]{1,64}", code) else None
     _LOG.warning("LLM failure type=%s status=%s code=%s", type(exc).__name__,
                  status if isinstance(status, int) else None, code)
+
+
+def log_cache_usage(raw: Any) -> None:
+    usage = _get(raw, "usage")
+    hit = _get(usage, "prompt_cache_hit_tokens")
+    miss = _get(usage, "prompt_cache_miss_tokens")
+    cached = _get(_get(usage, "prompt_tokens_details"), "cached_tokens")
+    counts = [v if isinstance(v, int) and not isinstance(v, bool) else None
+              for v in (hit, miss, cached)]
+    _LOG.debug("LLM cache prompt_cache_hit_tokens=%s prompt_cache_miss_tokens=%s cached_tokens=%s", *counts)
 
 
 def _sdk_completion(client: Any, payload: Mapping[str, Any]) -> Any:
