@@ -84,3 +84,56 @@ ash/
 │   └── user_prefs.json      # Created at runtime (lang preferences)
 ├── requirements.txt
 └── README.md
+
+## Provider compatibility, intent guard and prompt cache
+
+- `LLM_REASONING_POLICY=off` by default (`low|medium|high|passthrough` also
+  supported). The adapter selects the Comet / DeepSeek / OpenRouter dialect by
+  hostname. Visible answers exclude separate reasoning fields and tagged thinking.
+  An unsupported reasoning **parameter** gets one retry without those controls;
+  other errors are not swallowed. This fallback cannot guarantee server-side off.
+- SDK defaults: `LLM_TIMEOUT_SECONDS=60`, `LLM_MAX_RETRIES=2`. Handler completions
+  run in threads, serialized per writer session. Timeout is per SDK attempt,
+  not a whole-handler deadline. Optional startup changelog errors do not abort startup.
+- Fixed system + command instructions precede the frozen session summary and
+  exact wire history. RAG sources live in the final user turn. History is bounded
+  by `LLM_HISTORY_MAX_CHARS=24000` and 40 messages, dropping oldest blocks on overflow;
+  only rollover updates the writing summary. Secretary sessions do not use it.
+- To enable the optional writer intent check, set `INTENT_GUARD_ENABLED=1`.
+  `INTENT_GUARD_MODEL` defaults to `deepseek-flash`; optional
+  `INTENT_GUARD_API_BASE` / `INTENT_GUARD_API_KEY` override the main configuration.
+  A different hostname requires its own key. For OpenRouter, set a provider-qualified
+  guard model ID explicitly. Failures/inputs over 16000 characters fail closed with
+  a localized retry message. No guard is applied to the secretary or admin/help/reset.
+  `/summary` and tool discussions are checked too, including pending documents.
+- `SECRETARY_OWNER_NAME` replaces the previously hardcoded account owner name.
+
+### Offline verification and cache diagnostics
+
+```bash
+python -m py_compile src/*.py
+python -m pytest -q
+```
+
+Tests require `pytest` and `pytest-asyncio` in addition to runtime dependencies.
+The suite blocks network connections and dotenv loading. `pytest.ini` limits
+collection to `tests/`: `scripts/test_changelog.py` is a manual, potentially live
+utility, not a unit test. Existing completion tests were migrated from the old
+SDK-kwargs contract; new tests exercise provider JSON via MockTransport.
+
+For cache diagnostics, enable **only** the `llm_completion` logger at DEBUG in
+an operator-controlled launcher (do not enable SDK HTTP debug logging):
+
+```python
+import logging
+logger = logging.getLogger("llm_completion")
+logger.setLevel(logging.DEBUG)
+logger.addHandler(logging.StreamHandler())
+# Start the normal application afterwards.
+```
+
+Look for `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens`, or `cached_tokens`.
+Missing fields are `None`, not zero. Logs contain numeric counters, not prompts.
+Compare repeated same-language/command calls within a history epoch. Prefix equality
+is tested offline; actual hits, routing and savings require provider usage evidence.
+**No live Comet/OpenRouter calls or billing measurements were made for this change.**
