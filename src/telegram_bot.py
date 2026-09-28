@@ -114,6 +114,7 @@ from writer_bot import WriterBot
 from lang_utils import detect_language
 from i18n import t
 from word_stats import add_word_count, get_stats, count_words, count_chars, reset_stats
+from intent_guard import IntentGuard
 from code_reviewer import check_and_generate_changelog, save_current_hashes
 
 # Import init_cache functionality for auto-updating after restart
@@ -172,8 +173,8 @@ Answer in the same language as the correspondent.
 
 IDENTITY
 At the beginning of a new conversation, briefly introduce yourself when it fits naturally.
-RU example: "Я Эш, ИИ-секретарь Никиты."
-EN example: "I'm Ash, the AI secretary for Nichita."
+Introduce yourself as the account owner's AI secretary.
+Owner name (may be empty; do not invent a name): __SECRETARY_OWNER_NAME__
 If asked who or what you are, answer directly and do not hide that you are an AI.
 Do not repeatedly re-introduce yourself once the conversation is underway.
 
@@ -384,7 +385,33 @@ class TelegramWriterBot:
         self.WAITING_STATES = set(self.STATE_CONFIG.keys()) | set(self.DISCUSSION_STATES.keys()) | {"cry_baby", "document_wait", "upload_wait", self.SUMMARY_FORMAT_STATE}
 
 
+        self.intent_guard = IntentGuard.from_env(api_base=llm_api_base, api_key=llm_api_key)
         self._register_handlers()
+
+    async def _guard_allows(self, message, text: str, operation: str) -> bool:
+        decision = await self.intent_guard.check(text, operation=operation)
+        if decision.ok:
+            return True
+        lang = self.user_langs.get(message.from_user.id, DEFAULT_LANG)
+        key = "guard_rejected" if decision.reason in {"model", "cache"} else "guard_retry"
+        await message.answer(t(lang, key))
+        return False
+
+    async def _run_writer(self, method, *args, **kwargs):
+        """Serialize each session while sync SDK/RAG work runs off the event loop."""
+        wb = method.__self__
+        if not hasattr(wb, "_async_lock"):
+            wb._async_lock = asyncio.Lock()
+        async with wb._async_lock:
+            task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Cancelling to_thread cannot stop its worker. Keep the session locked.
+                try:
+                    await task
+                finally:
+                    raise
 
     async def run(self):
         """Start the bot and check for code changes to generate changelog."""
@@ -403,7 +430,11 @@ class TelegramWriterBot:
         # Start background task for auto porko/lobster in group chats
         self.porko_lobster_task = asyncio.create_task(self._porko_lobster_background_loop())
         
-        await self.dp.start_polling(self.bot)
+        try:
+            await self.dp.start_polling(self.bot)
+        finally:
+            self.porko_lobster_task.cancel()
+            await self.intent_guard.aclose()
 
     def _load_user_prefs(self):
         """Load user preferences from JSON file."""
@@ -639,9 +670,10 @@ class TelegramWriterBot:
                 use_rag=False,
                 language=language,
             )
-            sess.system_prompt = SECRETARY_SYSTEM_PROMPT
+            sess.system_prompt = SECRETARY_SYSTEM_PROMPT.replace(
+                "__SECRETARY_OWNER_NAME__", os.getenv("SECRETARY_OWNER_NAME", ""))
             # WriterBot's generic session summarizer is writing-coach-specific; do not let it pollute secretary context.
-            sess.summary_trigger_count = 10_000
+            sess.summarize_history = False
             self.secretary_sessions[key] = sess
         elif sess.language != language:
             sess.language = language
@@ -954,7 +986,7 @@ class TelegramWriterBot:
         safe_input = self._wrap_secretary_input(text)
 
         try:
-            raw_result = wb.chat(safe_input)
+            raw_result = await self._run_writer(wb.chat, safe_input)
         except Exception as e:
             print(f"Secretary LLM error: {type(e).__name__}")
             return
@@ -1345,8 +1377,10 @@ class TelegramWriterBot:
             await message.answer(t(lang, "block_prompt_empty"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+        if not await self._guard_allows(message, text, 'block'):
+            return
         wb = self._get_writer_bot(user_id)
-        reply = wb.handle_block(text)
+        reply = await self._run_writer(wb.handle_block, text)
         await self._finish_tool(message, user_id, lang, reply, "block_wait", source_text=text)
 
     async def _handle_develop(self, message: types.Message):
@@ -1360,7 +1394,9 @@ class TelegramWriterBot:
             await message.answer(t(lang, "develop_prompt_empty"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).develop_idea(text)
+        if not await self._guard_allows(message, text, 'develop'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).develop_idea, text)
         await self._finish_tool(message, user_id, lang, reply, "develop_wait", source_text=text)
 
     async def _handle_character(self, message: types.Message):
@@ -1374,7 +1410,9 @@ class TelegramWriterBot:
             await message.answer(t(lang, "character_prompt_empty"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).character_help(text)
+        if not await self._guard_allows(message, text, 'character'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).character_help, text)
         await self._finish_tool(message, user_id, lang, reply, "character_wait", source_text=text)
 
     async def _handle_dialogue(self, message: types.Message):
@@ -1388,13 +1426,15 @@ class TelegramWriterBot:
             await message.answer(t(lang, "dialogue_prompt_empty"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).dialogue_help(text)
+        if not await self._guard_allows(message, text, 'dialogue'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).dialogue_help, text)
         await self._finish_tool(message, user_id, lang, reply, "dialogue_wait", source_text=text)
 
     async def _handle_prompt(self, message: types.Message):
         user_id = message.from_user.id
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
-        prompt = self._get_writer_bot(user_id).get_random_prompt()
+        prompt = await self._run_writer(self._get_writer_bot(user_id).get_random_prompt)
         await message.answer(f"{t(lang, 'prompt_label')}\n\n{prompt}")
 
     async def _handle_idea(self, message: types.Message):
@@ -1416,7 +1456,9 @@ class TelegramWriterBot:
                 await message.answer(t(lang, "text_too_short", min=20))
                 return
             await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-            reply = self._get_writer_bot(user_id).feedback_on_text(text)
+            if not await self._guard_allows(message, text, 'feedback'):
+                return
+            reply = await self._run_writer(self._get_writer_bot(user_id).feedback_on_text, text)
             await self._finish_tool(message, user_id, lang, reply, "feedback", source_text=text)
             return
         
@@ -1427,7 +1469,9 @@ class TelegramWriterBot:
             await message.answer(t(lang, "feedback_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).feedback_on_text(text)
+        if not await self._guard_allows(message, text, 'feedback'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).feedback_on_text, text)
         await self._finish_tool(message, user_id, lang, reply, "feedback", source_text=text)
 
     async def _handle_style_cmd(self, message: types.Message):
@@ -1443,7 +1487,9 @@ class TelegramWriterBot:
                 await message.answer(t(lang, "text_too_short", min=20))
                 return
             await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-            reply = self._get_writer_bot(user_id).analyze_style(text)
+            if not await self._guard_allows(message, text, 'style'):
+                return
+            reply = await self._run_writer(self._get_writer_bot(user_id).analyze_style, text)
             await self._finish_tool(message, user_id, lang, reply, "style", source_text=text)
             return
         
@@ -1454,7 +1500,9 @@ class TelegramWriterBot:
             await message.answer(t(lang, "style_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).analyze_style(text)
+        if not await self._guard_allows(message, text, 'style'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).analyze_style, text)
         await self._finish_tool(message, user_id, lang, reply, "style", source_text=text)
 
     async def _handle_roast(self, message: types.Message):
@@ -1470,7 +1518,9 @@ class TelegramWriterBot:
                 await message.answer(t(lang, "text_too_short", min=50))
                 return
             await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-            reply = self._get_writer_bot(user_id).roast(text)
+            if not await self._guard_allows(message, text, 'roast'):
+                return
+            reply = await self._run_writer(self._get_writer_bot(user_id).roast, text)
             await self._finish_tool(message, user_id, lang, reply, "roast", source_text=text)
             return
         
@@ -1481,7 +1531,9 @@ class TelegramWriterBot:
             await message.answer(t(lang, "roast_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).roast(text)
+        if not await self._guard_allows(message, text, 'roast'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).roast, text)
         await self._finish_tool(message, user_id, lang, reply, "roast", source_text=text)
 
     async def _handle_praise(self, message: types.Message):
@@ -1497,7 +1549,9 @@ class TelegramWriterBot:
                 await message.answer(t(lang, "text_too_short", min=50))
                 return
             await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-            reply = self._get_writer_bot(user_id).praise(text)
+            if not await self._guard_allows(message, text, 'praise'):
+                return
+            reply = await self._run_writer(self._get_writer_bot(user_id).praise, text)
             await self._finish_tool(message, user_id, lang, reply, "praise", source_text=text)
             return
         
@@ -1508,7 +1562,9 @@ class TelegramWriterBot:
             await message.answer(t(lang, "praise_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).praise(text)
+        if not await self._guard_allows(message, text, 'praise'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).praise, text)
         await self._finish_tool(message, user_id, lang, reply, "praise", source_text=text)
 
     async def _handle_corrector(self, message: types.Message):
@@ -1524,7 +1580,9 @@ class TelegramWriterBot:
                 await message.answer(t(lang, "text_too_short", min=3))
                 return
             await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-            reply = self._get_writer_bot(user_id).correct_text(text)
+            if not await self._guard_allows(message, text, 'corrector'):
+                return
+            reply = await self._run_writer(self._get_writer_bot(user_id).correct_text, text)
             await self._finish_tool(message, user_id, lang, reply, "corrector_wait", source_text=text)
             return
         
@@ -1535,7 +1593,9 @@ class TelegramWriterBot:
             await message.answer(t(lang, "corrector_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).correct_text(text)
+        if not await self._guard_allows(message, text, 'corrector'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).correct_text, text)
         await self._finish_tool(message, user_id, lang, reply, "corrector_wait", source_text=text)
 
     async def _handle_editor(self, message: types.Message):
@@ -1551,7 +1611,9 @@ class TelegramWriterBot:
                 await message.answer(t(lang, "text_too_short", min=5))
                 return
             await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-            reply = self._get_writer_bot(user_id).edit_text(text)
+            if not await self._guard_allows(message, text, 'editor'):
+                return
+            reply = await self._run_writer(self._get_writer_bot(user_id).edit_text, text)
             await self._finish_tool(message, user_id, lang, reply, "editor_wait", source_text=text)
             return
         
@@ -1562,7 +1624,9 @@ class TelegramWriterBot:
             await message.answer(t(lang, "editor_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).edit_text(text)
+        if not await self._guard_allows(message, text, 'editor'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).edit_text, text)
         await self._finish_tool(message, user_id, lang, reply, "editor_wait", source_text=text)
 
     async def _handle_count_me(self, message: types.Message):
@@ -1617,7 +1681,7 @@ class TelegramWriterBot:
         user_id = message.from_user.id
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
         await message.answer(t(lang, "lobster_typing"))
-        chunks = self._get_writer_bot(user_id).lobster()
+        chunks = await self._run_writer(self._get_writer_bot(user_id).lobster)
         
         # Check if lobster returned valid chunks
         if not chunks:
@@ -1649,7 +1713,7 @@ class TelegramWriterBot:
             await message.answer(t(lang, "pun_no_message"))
             return
             
-        reply = self._get_writer_bot(user_id).pun(target_text)
+        reply = await self._run_writer(self._get_writer_bot(user_id).pun, target_text)
         await message.answer(reply)
     async def _handle_porko(self, message: types.Message):
         user_id = message.from_user.id
@@ -1669,13 +1733,18 @@ class TelegramWriterBot:
             return True, text
             
         # Check if bot is mentioned
-        if message.entities:
-            for entity in message.entities:
+        entities = message.entities if message.text else message.caption_entities
+        if entities:
+            original = message.text or message.caption or ""
+            utf16 = original.encode("utf-16-le")
+            for entity in entities:
                 if entity.type == "mention":
-                    mention = text[entity.offset:entity.offset + entity.length]
+                    start = entity.offset * 2
+                    end = (entity.offset + entity.length) * 2
+                    mention = utf16[start:end].decode("utf-16-le")
                     if self.bot_username and mention.lower() == f"@{self.bot_username.lower()}":
                         # Remove mention from text
-                        clean_text = text[:entity.offset] + text[entity.offset + entity.length:]
+                        clean_text = (utf16[:start] + utf16[end:]).decode("utf-16-le")
                         return True, clean_text.strip()
         
         # Check if replying to bot's message
@@ -2138,7 +2207,9 @@ class TelegramWriterBot:
                 await message.answer(t(lang, "text_too_short", min=5))
                 return
             await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-            reply = self._get_writer_bot(user_id).methodique(text)
+            if not await self._guard_allows(message, text, 'methodique'):
+                return
+            reply = await self._run_writer(self._get_writer_bot(user_id).methodique, text)
             await self._finish_tool(message, user_id, lang, reply, "methodique_wait", source_text=text)
             return
         
@@ -2150,7 +2221,7 @@ class TelegramWriterBot:
         if text in ("Методичка", "Methodic") or (message.text or "").strip() in ("Методичка", "Methodic"):
             await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
             wb = self._get_writer_bot(user_id)
-            reply = wb.methodique_random()
+            reply = await self._run_writer(wb.methodique_random)
             await self._send_long_message(message, reply, reply_markup=get_main_keyboard(lang))
             return
         
@@ -2160,14 +2231,16 @@ class TelegramWriterBot:
             await message.answer(t(lang, "methodichque_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        reply = self._get_writer_bot(user_id).methodique(text)
+        if not await self._guard_allows(message, text, 'methodique'):
+            return
+        reply = await self._run_writer(self._get_writer_bot(user_id).methodique, text)
         await self._finish_tool(message, user_id, lang, reply, "methodique_wait", source_text=text)
 
     async def _handle_cite(self, message: types.Message):
         user_id = message.from_user.id
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
         self._touch_user_activity(user_id)
-        result = self._get_writer_bot(user_id).cite()
+        result = await self._run_writer(self._get_writer_bot(user_id).cite)
         if not isinstance(result, tuple) or len(result) != 2:
             quote, writer = ("The blank page is a mirror", "Unknown")
         else:
@@ -2307,10 +2380,11 @@ class TelegramWriterBot:
 
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
+        if not await self._guard_allows(message, full_text, 'summary'):
+            return True
         wb = self._get_writer_bot(user_id)
         instr = t(lang, instr_key)
-
-        response = wb.generate_response(
+        response = await self._run_writer(wb.generate_response,
             full_text,
             temporary_system_instruction=instr,
             command="summary"
@@ -2368,12 +2442,12 @@ class TelegramWriterBot:
             # We need to peek into writer_bot's logic or just use its cite() and track history here
             # Since cite() is random, we'll try a few times to get a new one or just accept it
             
-            quote, writer = wb.cite()
+            quote, writer = await self._run_writer(wb.cite)
             history = self.user_cite_history.get(user_id, [])
             
             # Simple deduplication: if quote in history, try one more time
             if quote in history:
-                quote, writer = wb.cite()
+                quote, writer = await self._run_writer(wb.cite)
             
             # Update history
             history.append(quote)
@@ -2744,7 +2818,7 @@ class TelegramWriterBot:
             wb = self._get_writer_bot(user_id)
             
             if text in ("Методичка", "Methodic"):
-                reply = wb.methodique_random()
+                reply = await self._run_writer(wb.methodique_random)
             elif text in ("Команды", "Commands"):
                 reply = t(lang, "help")
             elif text in ("Промпт", "Prompt"):
@@ -2804,9 +2878,11 @@ class TelegramWriterBot:
                 pass
 
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+        if not await self._guard_allows(message, text, 'chat'):
+            return
         wb = self._get_writer_bot(user_id)
         try:
-            response = wb.chat(text)
+            response = await self._run_writer(wb.chat, text)
             if not response or response.startswith("Error"):
                 # Track error
                 self.user_error_count[user_id] = self.user_error_count.get(user_id, 0) + 1
@@ -2855,6 +2931,8 @@ class TelegramWriterBot:
         
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
         
+        if not await self._guard_allows(message, text + "\n\n" + analyzed_text, "discussion"):
+            return
         try:
             wb = self._get_writer_bot(user_id)
             
@@ -2863,19 +2941,17 @@ class TelegramWriterBot:
                 base_instr = t(lang, instr_key)
                 discussion_instr = (
                     f"{base_instr}\n\n"
-                    f"Original text analyzed: {analyzed_text[:500]}...\n"
                     f"User is asking about your previous analysis. "
                     f"Answer their question while maintaining the same analytical perspective."
                 )
             else:
                 discussion_instr = (
-                    f"Original text: {analyzed_text[:500]}...\n"
                     f"User is asking about your previous response. "
                     f"Answer their question while maintaining the same perspective."
                 )
             
-            response = wb.generate_response(
-                f"User question: {text}",
+            response = await self._run_writer(wb.generate_response,
+                t(lang, "rag_user_turn", sources=analyzed_text[:500], request=text),
                 temporary_system_instruction=discussion_instr
             )
             
@@ -2979,6 +3055,8 @@ class TelegramWriterBot:
             await message.answer(t(lang, "error_llm"))
             return
 
+        if not await self._guard_allows(message, full_text, state.removesuffix("_wait")):
+            return
         wb = self._get_writer_bot(user_id)
         handler = getattr(wb, handler_method, None)
         if handler is None:
@@ -2989,7 +3067,7 @@ class TelegramWriterBot:
 
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
         try:
-            reply = handler(full_text)
+            reply = await self._run_writer(handler, full_text)
             await self._finish_tool(message, user_id, lang, reply, state, source_text=full_text)
             return
 
@@ -3022,7 +3100,7 @@ class TelegramWriterBot:
                     else:
                         await self.bot.send_chat_action(chat_id=chat_id, action="typing")
                         wb = self._get_writer_bot(0)
-                        chunks = wb.lobster()
+                        chunks = await self._run_writer(wb.lobster)
                         if chunks:
                             for chunk in chunks:
                                 if chunk and chunk.strip():

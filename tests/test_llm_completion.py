@@ -18,40 +18,29 @@ from llm_completion import (
 
 
 def test_completion_kwargs_disable_thinking():
-    kwargs = completion_kwargs(model="deepseek-v4-pro", temperature=0.7)
+    kwargs = completion_kwargs(base_url="https://api.cometapi.com/v1",
+        reasoning_policy="off", model="deepseek-v4-pro", temperature=0.7)
     assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
-    assert kwargs["extra_body"]["reasoning_effort"] == "none"
-    assert kwargs["reasoning_effort"] == "none"
-    assert kwargs["model"] == "deepseek-v4-pro"
+    assert "reasoning_effort" not in kwargs
     assert kwargs["temperature"] == 0.7
 
 
 def test_completion_kwargs_overwrite_existing_thinking():
-    kwargs = completion_kwargs(
-        extra_body={"thinking": {"type": "enabled"}, "foo": 1},
-        reasoning_effort="high",
-    )
-    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
-    assert kwargs["extra_body"]["reasoning_effort"] == "none"
-    assert kwargs["extra_body"]["foo"] == 1
-    assert kwargs["reasoning_effort"] == "none"
+    kwargs = completion_kwargs(base_url="https://api.cometapi.com/v1",
+        reasoning_policy="off", model="deepseek-v4-pro",
+        extra_body={"thinking": {"type": "enabled"}, "foo": 1}, reasoning_effort="high")
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}, "foo": 1}
+    assert "reasoning_effort" not in kwargs
 
 
-def test_create_chat_completion_retries_without_top_level_reasoning_effort():
+def test_create_chat_completion_does_not_retry_programming_errors():
+    import pytest
     client = MagicMock()
-    client.chat.completions.create.side_effect = [
-        TypeError("create() got an unexpected keyword argument 'reasoning_effort'"),
-        SimpleNamespace(ok=True),
-    ]
-    result = create_chat_completion(client, model="deepseek-v4-pro", messages=[])
-    assert result.ok is True
-    assert client.chat.completions.create.call_count == 2
-    first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
-    second_kwargs = client.chat.completions.create.call_args_list[1].kwargs
-    assert first_kwargs["reasoning_effort"] == "none"
-    assert "reasoning_effort" not in second_kwargs
-    assert second_kwargs["extra_body"]["thinking"] == {"type": "disabled"}
-    assert second_kwargs["extra_body"]["reasoning_effort"] == "none"
+    client.base_url = "https://api.cometapi.com/v1"
+    client.chat.completions.create.side_effect = TypeError("unexpected keyword")
+    with pytest.raises(TypeError):
+        create_chat_completion(client, reasoning_policy="off", model="deepseek-v4-pro", messages=[])
+    assert client.chat.completions.create.call_count == 1
 
 
 def test_extract_completion_ignores_reasoning_fields():
@@ -80,3 +69,21 @@ def test_strip_and_visible_text_drop_think_tags():
         choices=[SimpleNamespace(message=SimpleNamespace(content=raw))]
     )
     assert visible_completion_text(response) == "Hello there"
+
+
+def test_http_error_logs_status_code_not_message(caplog):
+    import openai
+    try:
+        import httpx
+    except ImportError:
+        import httpx2 as httpx
+    client = SimpleNamespace(base_url='https://api.cometapi.com/v1', chat=SimpleNamespace(completions=MagicMock()))
+    client.chat.completions.create.side_effect = openai.BadRequestError(
+        'PRIVATE TEXT', response=httpx.Response(400, request=httpx.Request('POST', 'https://offline.invalid')),
+        body={'code': 'invalid_request', 'message': 'PRIVATE TEXT'})
+    import pytest
+    with pytest.raises(openai.BadRequestError):
+        create_chat_completion(client, reasoning_policy='off', model='deepseek-v4-pro')
+    assert 'status=400' in caplog.text
+    assert 'code=invalid_request' in caplog.text
+    assert 'PRIVATE' not in caplog.text
