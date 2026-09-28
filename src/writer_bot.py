@@ -340,7 +340,7 @@ class WriterBot:
     def _main_system_prompt(self) -> str:
         if not self.summarize_history:  # Secretary has its own JSON output contract.
             return self.system_prompt
-        return self.system_prompt.rstrip() + "\n\n" + t(self.language, "clean_text_instr")
+        return self.system_prompt.rstrip() + t(self.language, "clean_text_instr")
 
     def _build_messages(self, user_input: str, extra_system: Optional[str] = None,
                         command: Optional[str] = None, *, context: Optional[str] = None,
