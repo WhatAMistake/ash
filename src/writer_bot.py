@@ -3,6 +3,7 @@ Ash — bot for writers: creative block, ideas, exercises, feedback.
 """
 
 import os
+import re
 import json
 import random
 from pathlib import Path
@@ -986,19 +987,46 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
         love_for_adelina = roll < 0.07  # ~7% chance
         print(f"[LOBSTER] love_for_adelina={love_for_adelina}, roll={roll:.4f}")
         if love_for_adelina:
-            # Use i18n instruction that explicitly requires mentioning "Adeline"
-            clean_suffix = "\n\nВАЖНО: Только чистый текст. Без звёздочек, без смайликов, без декоративных элементов." if self.language == "ru" else "\n\nIMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements."
-            instr = t(self.language, "instr_lobster_love", default="Write a love letter from the lobster to Adeline. Explicitly mention 'Adeline' by name in the text. Themes: doomed love, the fragility of beauty, the approaching end. Tone: romantic, melancholic, desperate. Maximum 300 characters. Output only the letter, nothing else.") + clean_suffix
+            clean_suffix = (
+                "\n\nВАЖНО: Только чистый текст. Без звёздочек, без смайликов, без декоративных элементов."
+                if self.language == "ru"
+                else "\n\nIMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements."
+            )
+            instr = (
+                t(
+                    self.language,
+                    "instr_lobster_love",
+                    default=(
+                        "Write a deep, romantic love letter from the lobster to Adeline. "
+                        "Explicitly address her by name: 'Adeline'. "
+                        "IMPORTANT: the lobster and the boiling pot are an elevated poetic metaphor for vulnerability "
+                        "and existential fragility, NOT a literal crustacean in a kitchen. "
+                        "No culinary or cooking references. "
+                        "Tone: sincerely romantic, tender, poetic, passionate, and touching: "
+                        "a confession of love amidst the cold abyss. Maximum 350 characters. "
+                        "Output only the letter itself, nothing else."
+                    ),
+                )
+                + clean_suffix
+            )
             out = self.generate_response("Love letter to Adeline.", temporary_system_instruction=instr)
             print(f"[LOBSTER] Adelina response: {out[:100] if out else 'None'}...")
             if self.language == "ru":
-                fallback = ["аделина, ты — единственный свет в этой тьме"]
+                fallback = ["аделина, среди бездны и холодных течений ты остаёшься моим единственным светом"]
             else:
-                fallback = ["adelina, you are the only light in this darkness"]
+                fallback = ["adeline, amidst the abyss and cold currents you remain my only light"]
             return [out] if out and not out.startswith("Error") else fallback
-        
+
         # Regular lobster monologue - pick a random theme for the whole pack
         themes_ru = [
+            "японская философия кинцуги: золотые швы на трещинах панциря, принятие изъянов и расколотого мира",
+            "икигай на илистом дне: поиск скрытого смысла бытия и причины просыпаться по утрам",
+            "ваби-саби и моно-но аварэ: скромная прелесть несовершенства и печальное очарование увядания",
+            "хоннэ и татэмаэ: сокровенные чувства спрятаны глубоко под панцирем, а миру явлен лишь холодный фасад клешней",
+            "югэн: глубокая таинственность океана, ускользающая красота и недосказанность бездны",
+            "травля некоторого мандрейка: этот несносный визжащий корень отравляет всё существование своими нападками и токсичным буллингом",
+            "абсурдная вражда с мандрейком: почему этот крикливый корень не оставит меня в покое на дне",
+            "стоицизм перед лицом выходок мандрейка: бессильная злоба корня разбивается о невозмутимый панцирь",
             "смертность и конечность бытия",
             "абсурд существования",
             "тяжесть сознания",
@@ -1006,12 +1034,19 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             "Стругацкие: прогрессоры, малыши и безысходность понимания",
             "тепловая смерть вселенной",
             "забвение и бессмысленность памяти",
-            "японская культура: ваби-саби, моно-но аварэ, красота увядания",
-            "антинатализм: грех рождения, лучше не родиться",
+            "антинатализм: грех рождения и бремя бытия, лучше не родиться",
             "обречённость человечества: мы сами себе конец",
-            "бездушные нейронки заменят нас всех"
+            "бездушные нейронки заменят нас всех",
         ]
         themes_en = [
+            "japanese philosophy of kintsugi: gold along cracks of the carapace, embracing brokenness and repair",
+            "ikigai on the muddy seabed: seeking hidden purpose and reason to awaken each morning",
+            "wabi-sabi and mono no aware: humble grace of imperfection and poignant sadness of transience",
+            "honne and tatemae: true raw emotions guarded deep beneath the shell, presenting an indifferent facade to the outside",
+            "yugen: subtle mystery of the oceanic void, profound depths that words cannot reach",
+            "bullying by a certain mandrake: that insufferable screeching root poisons existence with its toxic harassment",
+            "absurd feud with a mandrake: why won't this noisy shrieking sprout leave me in peace at the seafloor",
+            "stoicism against the mandrake's antics: the screeching root's petty malice breaks against an unmoved carapace",
             "mortality and finitude of being",
             "absurdity of existence",
             "weight of consciousness",
@@ -1019,54 +1054,113 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             "Strugatsky: progressors, little ones and hopelessness of understanding",
             "heat death of the universe",
             "oblivion and meaninglessness of memory",
-            "japanese culture: wabi-sabi, mono no aware, beauty of decay",
             "antinatalism: the sin of birth, better never to have been",
             "doom of humanity: we are our own end",
-            "soulless neural networks will replace us all"
+            "soulless neural networks will replace us all",
         ]
-        
+
         themes = themes_ru if self.language == "ru" else themes_en
         chosen_theme = random.choice(themes)
         print(f"[LOBSTER] Theme: {chosen_theme}")
-        
-        base_instr = t(self.language, "instr_lobster", default="You are a lobster. Write 3–5 short messages. Each message is EXACTLY ONE sentence, lowercase, no capitals, NO DOTS at the end. Separate messages with the line: ---MESSAGE---\n\nExample format:\nwe are all already dead, we just haven't stopped moving\n---MESSAGE---\nevery breath is a debt we pay to the void\n---MESSAGE---\nwhen the pot lid slams shut you'll remember my words\n\nThemes: mortality, absurdity, weight of consciousness, inevitability of the pot. Tone: bleak, lyrical. Only the monologue, nothing else.")
-        
-        # Inject the chosen theme into the instruction
-        instr = base_instr.replace(
-            "Themes: mortality, absurdity, weight of consciousness, inevitability of the pot.",
-            f"Theme for this monologue (all messages on this one topic): {chosen_theme}."
-        ).replace(
-            "Темы: смертность, абсурд, тяжесть сознания, неизбежность кастрюли.",
-            f"Тема этого монолога (все сообщения на эту одну тему): {chosen_theme}."
+
+        base_instr = t(
+            self.language,
+            "instr_lobster",
+            default=(
+                "You are a lobster. Write 3–5 short messages. Each message is EXACTLY ONE sentence, lowercase, no capitals, NO DOTS at the end. Separate messages with the line: ---MESSAGE---\n\n"
+                "Example format:\n"
+                "we are all already dead, we just haven't stopped moving\n"
+                "---MESSAGE---\n"
+                "gold along the cracks of the shell speaks of kintsugi\n"
+                "---MESSAGE---\n"
+                "the mandrake shrieks again thinking it can pierce my armor\n\n"
+                "Themes: mortality, absurdity, japanese philosophy (kintsugi, wabi-sabi, ikigai, honne and tatemae), harassment by a certain mandrake. "
+                "Tone: varied — contemplative, ironic, stoic, sardonic, or melancholic (not always gloomy, but keeping an existential depth). "
+                "Only the monologue, nothing else."
+            ),
         )
-        
+
+        # Inject the chosen theme into the instruction
+        if "Темы:" in base_instr:
+            instr = re.sub(
+                r"Темы:[^\n]+",
+                f"Тема этого монолога (все сообщения посвящены одной теме): {chosen_theme}.",
+                base_instr,
+            )
+        elif "Themes:" in base_instr:
+            instr = re.sub(
+                r"Themes:[^\n]+",
+                f"Theme for this monologue (all messages on this one topic): {chosen_theme}.",
+                base_instr,
+            )
+        else:
+            instr = f"{base_instr}\n\nTheme: {chosen_theme}"
+
         # Add clean text instruction
-        clean_suffix = "\n\nВАЖНО: Только чистый текст. Без звёздочек, без смайликов, без декоративных элементов." if self.language == "ru" else "\n\nIMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements."
+        clean_suffix = (
+            "\n\nВАЖНО: Только чистый текст. Без звёздочек, без смайликов, без декоративных элементов."
+            if self.language == "ru"
+            else "\n\nIMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements."
+        )
         instr = instr + clean_suffix
         if self.language == "ru":
-            fallback = [
-                "мы все уже мертвы; мы просто ещё не остановились",
-                "---MESSAGE---",
-                "каждый вздох — это долг, который мы выплачиваем пустоте",
-                "---MESSAGE---",
-                "когда крышка кастрюли захлопнется — ты вспомнишь мои слова"
+            fallback_choices = [
+                [
+                    "мы все уже мертвы; мы просто ещё не остановились",
+                    "---MESSAGE---",
+                    "каждый вздох — это долг, который мы выплачиваем пустоте",
+                    "---MESSAGE---",
+                    "когда крышка захлопнется — ты вспомнишь мои слова",
+                ],
+                [
+                    "золото в трещинах панциря напоминает о кинцуги",
+                    "---MESSAGE---",
+                    "мандрейк опять истошно визжит где-то на мелководье",
+                    "---MESSAGE---",
+                    "мой икигай давно затерялся в холодном иле",
+                ],
+                [
+                    "под татэмаэ непроницаемой брони прячется лишь усталое хоннэ",
+                    "---MESSAGE---",
+                    "ваби-саби учит любить несовершенство, но не крики этого дурацкого корня",
+                    "---MESSAGE---",
+                    "на глубине нет ничего кроме тишины и терпения",
+                ],
             ]
+            fallback = random.choice(fallback_choices)
         else:
-            fallback = [
-                "we are all already dead; we just haven't stopped moving yet",
-                "---MESSAGE---",
-                "every breath is a debt we pay to the void",
-                "---MESSAGE---",
-                "when the pot lid slams shut — you'll remember my words"
+            fallback_choices = [
+                [
+                    "we are all already dead; we just haven't stopped moving yet",
+                    "---MESSAGE---",
+                    "every breath is a debt we pay to the void",
+                    "---MESSAGE---",
+                    "when the pot lid slams shut — you'll remember my words",
+                ],
+                [
+                    "gold in the carapace cracks speaks of kintsugi",
+                    "---MESSAGE---",
+                    "the mandrake shrieks hysterically somewhere in the shallows again",
+                    "---MESSAGE---",
+                    "my ikigai was lost in the cold silt long ago",
+                ],
+                [
+                    "beneath the tatemae of an armor lies only weary honne",
+                    "---MESSAGE---",
+                    "wabi-sabi teaches grace in imperfection, but not in that wretched root's howling",
+                    "---MESSAGE---",
+                    "in the deep there is nothing but silence and patience",
+                ],
             ]
-        
+            fallback = random.choice(fallback_choices)
+
         out = self.generate_response("Lobster monologue.", temporary_system_instruction=instr)
         print(f"[LOBSTER] Regular response: {out[:150] if out else 'None'}...")
         if not out or out.startswith("Error"):
             # Extract actual messages from fallback list (elements at even indices: 0, 2, 4...)
             messages = [fallback[i].strip() for i in range(0, len(fallback), 2) if fallback[i].strip()]
             return messages if messages else ["the lobster is silent..."]  # Last resort fallback
-        
+
         parts = [p.strip() for p in out.split("---MESSAGE---") if p.strip()]
         print(f"[LOBSTER] Parsed parts: {len(parts)} messages")
         return parts if parts else [out]
@@ -1074,7 +1168,16 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
     # --- XYX: short random interjection ---
     def porko(self) -> str:
         """Return random short interjection."""
-        return random.choice(["хух", "хухни"])
+        return random.choice([
+            "хух",
+            "хухни",
+            "давайте правильно общаться",
+            "давайте лампово общаться"
+            "наука на твоей стороне",
+            "бульк",
+            "булькни",
+            "а могли бы лампироваться",
+        ])
 
     # --- Pun: wordplay on a single word from the last message ---
     def pun(self, last_message: str) -> str:
