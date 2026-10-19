@@ -325,6 +325,13 @@ class WriterBot:
         }
 
     def _build_messages(self, user_input: str, extra_system: Optional[str] = None, command: Optional[str] = None) -> list[dict]:
+        if command == "lobster":
+            messages = []
+            if extra_system:
+                messages.append({"role": "system", "content": extra_system})
+            messages.append({"role": "user", "content": user_input})
+            return messages
+
         # Keep system_prompt as separate message to ensure it's not ignored
         messages = [{"role": "system", "content": self.system_prompt}]
         if extra_system:
@@ -1009,7 +1016,8 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                 )
                 + clean_suffix
             )
-            out = self.generate_response("Love letter to Adeline.", temporary_system_instruction=instr)
+            user_msg = "Напиши любовное письмо к Аделине." if self.language == "ru" else "Write a love letter to Adeline."
+            out = self.generate_response(user_msg, temporary_system_instruction=instr, command="lobster")
             print(f"[LOBSTER] Adelina response: {out[:100] if out else 'None'}...")
             if self.language == "ru":
                 fallback = ["аделина, среди бездны и холодных течений ты остаёшься моим единственным светом"]
@@ -1154,14 +1162,19 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             ]
             fallback = random.choice(fallback_choices)
 
-        out = self.generate_response("Lobster monologue.", temporary_system_instruction=instr)
+        user_msg = "Напиши монолог лобстера." if self.language == "ru" else "Write a lobster monologue."
+        out = self.generate_response(user_msg, temporary_system_instruction=instr, command="lobster")
         print(f"[LOBSTER] Regular response: {out[:150] if out else 'None'}...")
         if not out or out.startswith("Error"):
             # Extract actual messages from fallback list (elements at even indices: 0, 2, 4...)
             messages = [fallback[i].strip() for i in range(0, len(fallback), 2) if fallback[i].strip()]
             return messages if messages else ["the lobster is silent..."]  # Last resort fallback
 
-        parts = [p.strip() for p in out.split("---MESSAGE---") if p.strip()]
+        if "---MESSAGE---" in out:
+            parts = [p.strip() for p in out.split("---MESSAGE---") if p.strip()]
+        else:
+            lines = [line.strip() for line in out.split("\n") if line.strip()]
+            parts = lines if len(lines) > 1 else [out.strip()]
         print(f"[LOBSTER] Parsed parts: {len(parts)} messages")
         return parts if parts else [out]
 
@@ -1172,7 +1185,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             "хух",
             "хухни",
             "давайте правильно общаться",
-            "давайте лампово общаться"
+            "давайте лампово общаться",
             "наука на твоей стороне",
             "бульк",
             "булькни",

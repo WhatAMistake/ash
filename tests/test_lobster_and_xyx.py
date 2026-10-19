@@ -17,9 +17,11 @@ def test_xyx_porko_randomizer():
         "хух",
         "хухни",
         "давайте правильно общаться",
+        "давайте лампово общаться",
         "наука на твоей стороне",
         "бульк",
         "булькни",
+        "а могли бы лампироваться",
     }
     seen = set()
     for _ in range(200):
@@ -84,3 +86,18 @@ def test_lobster_adelina_roll_fallback():
         messages = bot_ru.lobster()
         assert len(messages) == 1
         assert "аделина" in messages[0].lower()
+
+
+def test_lobster_isolated_from_ash_system_prompt():
+    bot = WriterBot(language="ru", use_rag=False)
+    from writer_bot import Message
+    bot.history.append(Message(role="user", content="Я хочу написать роман"))
+    bot.history.append(Message(role="assistant", content="Отлично, о чём он?"))
+
+    built = bot._build_messages("Напиши монолог лобстера.", extra_system="Инструкция лобстера", command="lobster")
+    # System prompt of Ash with jailbreak rules must NOT be in messages
+    all_contents = " ".join(m["content"] for m in built)
+    assert bot.system_prompt not in all_contents
+    assert "Я хочу написать роман" not in all_contents
+    assert "Инструкция лобстера" in all_contents
+
