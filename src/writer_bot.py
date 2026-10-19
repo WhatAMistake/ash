@@ -28,7 +28,7 @@ class WriterBot:
 
     def __init__(
         self,
-        model: str = "deepseek-v4.1-flash",
+        model: str = "claude-haiku-5-5",
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
         use_rag: bool = True,
@@ -36,7 +36,7 @@ class WriterBot:
         language: str = "en",
     ):
         self.model = model
-        self.chat_model = "deepseek-v4.1-flash"  # Secondary model for simple chat/chitchat
+        self.chat_model = "claude-haiku-5-5"  # Secondary model for simple chat/chitchat
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.api_base = api_base or os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
         self.language = language
