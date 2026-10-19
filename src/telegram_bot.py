@@ -263,7 +263,7 @@ class TelegramWriterBot:
     def __init__(
         self,
         telegram_token: str,
-        llm_model: str = "claude-haiku-5-5",
+        llm_model: str = "qwen3.8-flash",
         llm_api_key: Optional[str] = None,
         llm_api_base: Optional[str] = None,
         use_rag: bool = True,
@@ -3041,7 +3041,7 @@ class TelegramWriterBot:
 async def main():
     import argparse
     parser = argparse.ArgumentParser(description="Ash Telegram Bot")
-    parser.add_argument("--model", default="claude-haiku-5-5", help="LLM model to use")
+    parser.add_argument("--model", default="qwen3.8-flash", help="LLM model to use")
     parser.add_argument("--no-rag", action="store_true", help="Disable RAG")
     args = parser.parse_args()
 
