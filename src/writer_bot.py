@@ -5,6 +5,7 @@ Ash — bot for writers: creative block, ideas, exercises, feedback.
 import os
 import re
 import json
+import logging
 import random
 from pathlib import Path
 from typing import Optional, Generator
@@ -13,9 +14,19 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from i18n import t
 from lang_utils import detect_language
-from llm_completion import create_chat_completion, visible_completion_text
+from llm_completion import (
+    LLM_MAX_RETRIES, LLM_TIMEOUT_SECONDS, create_chat_completion,
+    visible_completion_text,
+)
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
+
+def _llm_error(exc: Exception) -> str:
+    # Provider exceptions may contain credentials, request bodies or document text.
+    logger.warning("llm_writer_failure error_type=%s", type(exc).__name__)
+    return "Error: LLM request failed."
 
 
 @dataclass
@@ -103,16 +114,22 @@ class WriterBot:
             self.rag = WriterRAG(data_dir=data_dir)
             print("Writer RAG initialized")
         except Exception as e:
-            print(f"Writer RAG unavailable: {e}")
+            logger.warning("rag_init_failure error_type=%s", type(e).__name__)
             self.rag = None
 
     def _init_llm(self):
         try:
             from openai import OpenAI
-            self.client = OpenAI(api_key=self.api_key, base_url=self.api_base)
+            self.client = OpenAI(
+                api_key=self.api_key, base_url=self.api_base,
+                timeout=LLM_TIMEOUT_SECONDS, max_retries=LLM_MAX_RETRIES,
+            )
             print(f"LLM client initialized: {self.model}")
         except ImportError:
             print("openai not installed. pip install openai")
+            self.client = None
+        except Exception as e:
+            logger.warning("llm_client_init_failure error_type=%s", type(e).__name__)
             self.client = None
 
     def _clear_prompts_cache(self) -> None:
@@ -153,11 +170,11 @@ class WriterBot:
                 print(f"[PROMPTS] Falling back to default prompts data")
                 self._prompts_data = self._default_prompts_data()
         except json.JSONDecodeError as e:
-            print(f"[PROMPTS] JSON parse error in {data_path}: {e}")
+            logger.warning("prompts_parse_failure error_type=%s", type(e).__name__)
             print(f"[PROMPTS] Falling back to default prompts data")
             self._prompts_data = self._default_prompts_data()
         except Exception as e:
-            print(f"[PROMPTS] Error loading {data_path}: {e}")
+            logger.warning("prompts_load_failure error_type=%s", type(e).__name__)
             print(f"[PROMPTS] Falling back to default prompts data")
             self._prompts_data = self._default_prompts_data()
         
@@ -372,8 +389,8 @@ class WriterBot:
             temporary_system_instruction = temporary_system_instruction + clean_text_instr
         else:
             temporary_system_instruction = clean_text_instr.strip()
-        messages = self._build_messages(user_input, extra_system=temporary_system_instruction, command=command)
         try:
+            messages = self._build_messages(user_input, extra_system=temporary_system_instruction, command=command)
             r = create_chat_completion(
                 self.client,
                 model=self.model,
@@ -381,17 +398,17 @@ class WriterBot:
                 temperature=0.7,
                 max_tokens=1000,
             )
-            return visible_completion_text(r)
+            return visible_completion_text(r) or "Error: Empty LLM response."
         except Exception as e:
-            return f"Error: {e}"
+            return _llm_error(e)
 
     def chat(self, user_input: str) -> str:
         if not self.client:
             return "Error: LLM client not initialized."
         # Add clean text instruction
         clean_text_instr = "ВАЖНО: Только чистый текст. Без звёздочек, без смайликов, без декоративных элементов, без эмодзи, без markdown-форматирования." if self.language == "ru" else "IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no markdown formatting."
-        messages = self._build_messages(user_input, extra_system=clean_text_instr)
         try:
+            messages = self._build_messages(user_input, extra_system=clean_text_instr)
             r = create_chat_completion(
                 self.client,
                 model=self.chat_model,
@@ -400,6 +417,8 @@ class WriterBot:
                 max_tokens=1000,
             )
             reply = visible_completion_text(r)
+            if not reply:
+                return "Error: Empty LLM response."
             self.history.append(Message(role="user", content=user_input))
             self.history.append(Message(role="assistant", content=reply))
             self.messages_since_summary += 2
@@ -407,7 +426,7 @@ class WriterBot:
                 self._maybe_summarize()
             return reply
         except Exception as e:
-            return f"Error: {e}"
+            return _llm_error(e)
 
     def _maybe_summarize(self):
         if not self.client or len(self.history) < 10:
@@ -429,10 +448,12 @@ class WriterBot:
                 temperature=0.3,
                 max_tokens=300,
             )
-            self.session_summary = visible_completion_text(r) or None
-            self.messages_since_summary = 0
+            summary = visible_completion_text(r)
+            if summary:
+                self.session_summary = summary
+                self.messages_since_summary = 0
         except Exception as e:
-            print(f"Summarization error: {e}")
+            logger.warning("llm_summary_failure error_type=%s", type(e).__name__)
 
     def handle_block(self, user_message: str) -> str:
         # Define all 12 tips and randomly select 2 to ensure variety
@@ -681,9 +702,11 @@ class WriterBot:
                 max_tokens=min(8000, max(2000, len(text) // 2)),
             )
             result = visible_completion_text(r)
+            if not result:
+                return "Error: Empty LLM response."
             return result + truncation_msg if was_truncated else result
         except Exception as e:
-            return f"Error: {e}"
+            return _llm_error(e)
 
     # --- Editor: clichés and bad expressions, 1–3 alternatives ---
     def edit_text(self, text: str) -> str:
@@ -801,9 +824,11 @@ Instruction: {base_instr}"""
                 max_tokens=1000,
             )
             result = visible_completion_text(r)
+            if not result:
+                return "Error: Empty LLM response."
             return result + truncation_msg if was_truncated else result
         except Exception as e:
-            return f"Error: {e}"
+            return _llm_error(e)
 
     # --- Methodique Random: random RAG from craft books when user sends just "Методичка" ---
     def methodique_random(self) -> str:
@@ -880,6 +905,8 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                 max_tokens=400,
             )
             content = visible_completion_text(r)
+            if not content:
+                return "Error: Empty LLM response."
             
             # Add author and book citation at the end
             # Translate known authors and books to English if needed
@@ -919,7 +946,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             return content + citation
             
         except Exception as e:
-            return f"Error: {e}"
+            return _llm_error(e)
 
     # --- Cite: random writer's diary citation + writer name ---
     def cite(self) -> tuple[str, str]:
@@ -953,7 +980,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                     if isinstance(item, str):
                         return (item, "Unknown")
             except Exception as e:
-                print(f"Cite load error: {e}")
+                logger.warning("cite_load_failure error_type=%s", type(e).__name__)
         # Fallback: localized quotes from i18n
         fallback_quotes = t(self.language, "cite_fallback_quotes", default=None)
         if fallback_quotes and isinstance(fallback_quotes, list) and fallback_quotes:
@@ -982,7 +1009,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                 if raw:
                     return (raw, "Unknown")
             except Exception as e:
-                print(f"Cite LLM error: {e}")
+                logger.warning("llm_cite_failure error_type=%s", type(e).__name__)
         if self.language == "ru":
             return ("Чистый лист — это зеркало", "Неизвестно")
         return ("The blank page is a mirror", "Unknown")
@@ -1018,7 +1045,6 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
             )
             user_msg = "Напиши любовное письмо к Аделине." if self.language == "ru" else "Write a love letter to Adeline."
             out = self.generate_response(user_msg, temporary_system_instruction=instr, command="lobster")
-            print(f"[LOBSTER] Adelina response: {out[:100] if out else 'None'}...")
             if self.language == "ru":
                 fallback = ["аделина, среди бездны и холодных течений ты остаёшься моим единственным светом"]
             else:
@@ -1164,7 +1190,6 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
 
         user_msg = "Напиши монолог лобстера." if self.language == "ru" else "Write a lobster monologue."
         out = self.generate_response(user_msg, temporary_system_instruction=instr, command="lobster")
-        print(f"[LOBSTER] Regular response: {out[:150] if out else 'None'}...")
         if not out or out.startswith("Error"):
             # Extract actual messages from fallback list (elements at even indices: 0, 2, 4...)
             messages = [fallback[i].strip() for i in range(0, len(fallback), 2) if fallback[i].strip()]
@@ -1270,7 +1295,7 @@ Output ONLY the pun, no explanation.""" + clean_suffix
             result = result.strip('"\'').split('\n')[0][:100]
             return result
         except Exception as e:
-            return f"Error: {e}"
+            return _llm_error(e)
 
     # --- Generate new prompt via LLM ---
     def generate_fresh_prompt(self) -> str:

@@ -13,7 +13,7 @@ python-docx>=1.0.0
 
 
 # LLM
-openai>=1.0.0
+openai>=1.0.0,<3.0.0
 anthropic>=0.18.0
 langdetect>=1.0.9
 
@@ -34,3 +34,7 @@ prompt_toolkit>=3.0.0
 # API (optional, for production)
 # fastapi>=0.109.0
 # uvicorn>=0.27.0
+
+# Tests
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

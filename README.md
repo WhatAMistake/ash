@@ -42,7 +42,15 @@ A Telegram bot for writers: creative block, ideas, exercises, feedback, and styl
    cd src
    python telegram_bot.py
    ```
-   Options: `--model deepseek-v4-pro` (default), `--no-rag` to disable RAG.
+   Options: `--model deepseek-v4.1-flash` (default), `--no-rag` to disable RAG.
+
+   LLM requests use a 60-second per-attempt timeout, at most two SDK retries,
+   and a process-wide limit of four concurrent requests. Telegram writer work
+   runs in bounded worker threads; messages for the same user are serialized.
+   LLM completion logs contain only outcome, duration, and error type, not
+   prompts, documents, credentials, or provider error messages.
+
+5. Run the mocked tests with `python -m pytest`. No live Telegram or LLM API is required.
 
 ## RAG (books)
 

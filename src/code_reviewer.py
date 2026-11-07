@@ -566,7 +566,7 @@ Return only the finished bullets or NONE. No reasoning."""
             witty = get_witty_comment(change_set.get("changed_files_count", 1), lang)
             return f"{witty}\n\n{changelog}"
     except Exception as e:
-        print(f"LLM changelog generation failed: {e}")
+        print(f"LLM changelog generation failed: {type(e).__name__}")
 
     # Honest non-LLM fallback: only if we clearly saw new commands
     new_commands = change_set.get("new_commands") or []

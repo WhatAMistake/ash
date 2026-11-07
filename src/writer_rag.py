@@ -85,7 +85,7 @@ class WriterRAG:
                 "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
             )
         except Exception as e:
-            print(f"Writer RAG: embedding model load failed: {e}")
+            print(f"Writer RAG: embedding model load failed: {type(e).__name__}")
             self.embedder = None
             return
         if CHROMADB_AVAILABLE:

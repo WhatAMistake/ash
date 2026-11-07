@@ -7,8 +7,17 @@ every call and strip leftover chain-of-thought if a proxy still leaks it.
 from __future__ import annotations
 
 import re
+import json
+import logging
+import threading
+import time
 from typing import Any, Dict
 
+logger = logging.getLogger(__name__)
+# Shared by all synchronous callers, including background/admin work.
+_completion_slots = threading.BoundedSemaphore(4)
+LLM_TIMEOUT_SECONDS = 60.0
+LLM_MAX_RETRIES = 2
 
 _THINK_TAG_RE = re.compile(
     r"<(think|thinking|thought|reasoning)\b[^>]*>.*?</\1>",
@@ -42,13 +51,28 @@ def create_chat_completion(client: Any, **kwargs: Any) -> Any:
     retry with extra_body only.
     """
     payload = completion_kwargs(**kwargs)
-    try:
-        return client.chat.completions.create(**payload)
-    except TypeError as exc:
-        if "reasoning_effort" not in str(exc):
+    started = time.monotonic()
+    with _completion_slots:
+        try:
+            try:
+                result = client.chat.completions.create(**payload)
+            except TypeError as exc:
+                if "reasoning_effort" not in str(exc):
+                    raise
+                payload.pop("reasoning_effort", None)
+                result = client.chat.completions.create(**payload)
+        except Exception as exc:
+            logger.warning(json.dumps({
+                "event": "llm_completion", "outcome": "error",
+                "error_type": type(exc).__name__,
+                "duration_ms": round((time.monotonic() - started) * 1000),
+            }))
             raise
-        payload.pop("reasoning_effort", None)
-        return client.chat.completions.create(**payload)
+    logger.info(json.dumps({
+        "event": "llm_completion", "outcome": "success",
+        "duration_ms": round((time.monotonic() - started) * 1000),
+    }))
+    return result
 
 
 def extract_completion_text(response: Any) -> str:
