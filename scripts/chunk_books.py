@@ -52,6 +52,8 @@ def extract_text_from_pdf(path: Path) -> str:
 
 def chunk_by_tokens(text: str, max_tokens: int = 500, overlap: int = 100) -> list[str]:
     """Split text into chunks by token count."""
+    if max_tokens <= 0 or overlap < 0 or overlap >= max_tokens:
+        raise ValueError("max_tokens must be positive and 0 <= overlap < max_tokens")
     if TIKTOKEN_AVAILABLE:
         enc = tiktoken.get_encoding("cl100k_base")
         tokens = enc.encode(text)
@@ -90,6 +92,12 @@ def chunk_by_paragraphs(text: str, max_tokens: int = 500) -> list[str]:
     
     for para in paragraphs:
         para_tokens = get_length(para)
+        if para_tokens > max_tokens:
+            if current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+                current_chunk, current_tokens = [], 0
+            chunks.extend(chunk_by_tokens(para, max_tokens, overlap=0))
+            continue
         
         if current_tokens + para_tokens > max_tokens and current_chunk:
             chunks.append("\n\n".join(current_chunk))
@@ -108,11 +116,12 @@ def chunk_by_paragraphs(text: str, max_tokens: int = 500) -> list[str]:
 def parse_filename(file_path: Path) -> tuple[str, str]:
     """Parse author and book title from filename like 'Author_Title.pdf'."""
     stem = file_path.stem  # filename without extension
-    # Replace underscores with spaces, handle multiple underscores
-    parts = stem.replace('_', ' ').split(' ', 1)
+    # Only an explicit underscore separates author from title. A space may be
+    # part of a multiword author or title and is not reliable evidence.
+    parts = stem.split('_', 1)
     if len(parts) == 2:
         author, title = parts
-        return author.strip(), title.strip()
+        return author.strip(), title.replace('_', ' ').strip()
     # If only one part, use it as title and Unknown as author
     return "Unknown", stem.replace('_', ' ').strip()
 
@@ -133,6 +142,8 @@ def process_book(
         author = author or parsed_author
         book_title = book_title or parsed_title
     
+    if max_tokens <= 0 or overlap < 0 or overlap >= max_tokens:
+        raise ValueError("max_tokens must be positive and 0 <= overlap < max_tokens")
     suffix = file_path.suffix.lower()
 
     if suffix == '.pdf':
@@ -164,9 +175,11 @@ def process_book(
     for i, chunk_text in enumerate(chunks):
         # Detect chapter if possible
         chapter = None
-        chapter_match = re.search(r'Chapter\s+(\d+|[IVX]+)[:\s]*([^\n]+)?', chunk_text, re.IGNORECASE)
+        # An inline reference to another chapter is not this chunk's chapter.
+        chapter_match = re.match(r'^\s*((?:Chapter|Глава)\s+(?:\d+|[IVX]+)[^\n]{0,80})\n',
+                                 chunk_text, re.IGNORECASE)
         if chapter_match:
-            chapter = chapter_match.group(0).strip()[:100]
+            chapter = chapter_match.group(1).strip()
         
         chunk_data = {
             "id": f"{base_id}_{i+1}",
