@@ -112,6 +112,7 @@ except ImportError:
     ReplyKeyboardBuilder = _DummyReplyKeyboardBuilder
 
 from writer_bot import WriterBot
+from editorial_tools import correction_changes
 from async_execution import AsyncExecution
 from lang_utils import detect_language
 from i18n import t
@@ -286,6 +287,8 @@ class TelegramWriterBot:
         self.user_states: dict[int, str] = {}
         self.last_user_message: dict[int, str] = {}
         self.accumulated_text: dict[int, str] = {}  # For multi-message input
+        self.tool_discussions = {}
+        self.uploaded_documents = {}
         
         # Error tracking for spam protection
 
@@ -579,12 +582,31 @@ class TelegramWriterBot:
             return
         discuss_state = self.STATE_TO_DISCUSS.get(tool_key)
         if discuss_state and discuss_state in self.DISCUSSION_STATES:
+            from_document = self.user_states.get(user_id) == "document_wait"
             self.user_states[user_id] = discuss_state
             if source_text is not None:
                 self.accumulated_text[user_id] = source_text
+            if not hasattr(self, "tool_discussions"):
+                self.tool_discussions = {}
+            self.tool_discussions[user_id] = {
+                "state": discuss_state, "original": source_text or "", "result": reply, "turns": []}
+            document = getattr(self, "uploaded_documents", {}).pop(user_id, None)
+            sent_file = False
+            if tool_key in ("corrector", "corrector_wait"):
+                if from_document and document and document["text"] == source_text:
+                    await self._send_corrected_document(message, reply, document, lang)
+                    sent_file = True
+                changes = correction_changes(source_text or "", reply)
+                if changes:
+                    label = "Изменения (фрагменты, не оценка значимости)" if lang == "ru" else "Changes (fragments, not ranked by importance)"
+                    lines = [f"{a!r} → {b!r}" for a, b in changes]
+                    changes_text = label + ":\n" + "\n".join(lines)
+                    self.tool_discussions[user_id]["result"] += "\n\n" + changes_text
+                    await self._send_long_message(message, changes_text)
             await self._send_long_message(
                 message,
-                f"{reply}\n\n{t(lang, 'discuss_mode_hint')}",
+                ((("Исправленный текст в файле." if lang == "ru" else "Corrected text is in the file.")
+                  if sent_file else reply) + f"\n\n{t(lang, 'discuss_mode_hint')}"),
                 reply_markup=get_main_keyboard(lang),
             )
             return
@@ -597,6 +619,48 @@ class TelegramWriterBot:
             reply,
             reply_markup=get_main_keyboard(lang),
         )
+
+    async def _send_corrected_document(self, message, corrected, document, lang):
+        """Return editable text, preserving the original DOCX structure when possible."""
+        name = Path(document["name"]).stem or "document"
+        if document["suffix"] == ".docx" and DOCX_AVAILABLE:
+            output = io.BytesIO()
+            doc = Document(io.BytesIO(document["content"]))
+            paragraphs = list(self._docx_paragraphs(doc))
+            original_parts = [p.text for p in paragraphs]
+            lines = iter(corrected.split("\n"))
+            replacements = []
+            for paragraph, old in zip(paragraphs, original_parts):
+                # Proofreading edits cannot change line breaks. Therefore each
+                # paragraph keeps exactly its original number of embedded breaks.
+                new = "\n".join(next(lines) for _ in range(old.count("\n") + 1))
+                if old != new:
+                    replacements.append((paragraph, new))
+            if next(lines, None) is not None:
+                raise ValueError("DOCX paragraph structure changed")
+            # paragraph.text replaces all inline XML. Never silently destroy
+            # drawings, hyperlinks or fields in a paragraph that needs changes.
+            unsafe = any(p._element.xpath(
+                ".//w:drawing | .//w:object | .//w:hyperlink | .//w:fldChar | .//w:instrText")
+                for p, _ in replacements)
+            if unsafe:
+                content, filename = corrected.encode("utf-8"), name + "_corrected.txt"
+                caption = ("TXT: в изменённом абзаце DOCX есть сложные объекты; исходный файл не изменён."
+                           if lang == "ru" else
+                           "TXT: a changed DOCX paragraph contains complex objects; the original is untouched.")
+            else:
+                for paragraph, new in replacements:
+                    paragraph.text = new
+                doc.save(output)
+                content, filename = output.getvalue(), name + "_corrected.docx"
+                caption = ("DOCX: проверен основной текст; форматирование изменённых абзацев может отличаться."
+                           if lang == "ru" else
+                           "DOCX: body text checked; formatting in changed paragraphs may differ.")
+        else:
+            content, filename = corrected.encode("utf-8"), name + "_corrected.txt"
+            caption = ("Текст UTF-8; вёрстка PDF не сохраняется." if lang == "ru"
+                       else "UTF-8 text; PDF layout is not preserved.")
+        await message.answer_document(types.BufferedInputFile(content, filename=filename), caption=caption)
 
     def _get_writer_bot(self, user_id: int) -> WriterBot:
         # Always get current language from user_langs to ensure it's up-to-date
@@ -1338,6 +1402,8 @@ class TelegramWriterBot:
         if user_id in self.sessions:
             self.sessions[user_id].reset()
         self.user_states[user_id] = "chat"
+        getattr(self, "tool_discussions", {}).pop(user_id, None)
+        getattr(self, "uploaded_documents", {}).pop(user_id, None)
         if user_id in self.accumulated_text:
             del self.accumulated_text[user_id]
         # Reset word and character stats
@@ -2071,6 +2137,11 @@ class TelegramWriterBot:
             
             # Store extracted text and set state for processing
             self.accumulated_text[user_id] = extracted_text
+            self.uploaded_documents[user_id] = {"name": file_name, "suffix": Path(file_name).suffix.lower(),
+                                                "text": extracted_text,
+                                                "content": Path(tmp_path).read_bytes()
+                                                if file_name.lower().endswith(".docx") else b""}
+            self.tool_discussions.pop(user_id, None)
             self.user_states[user_id] = "document_wait"
             
             # Ask user what to do with the text
@@ -2080,8 +2151,17 @@ class TelegramWriterBot:
                   chars=len(extracted_text), 
                   preview=preview,
                   commands="/feedback /style /roast /corrector /editor /methodique /count_me /summary /praise")
+                + (("\nDOCX: обработан основной текст и таблицы, без колонтитулов и примечаний."
+                    if lang == "ru" else
+                    "\nDOCX: body text and tables only; headers, footers and notes are not analyzed.")
+                   if file_name.lower().endswith(".docx") else "")
             )
             
+        except ValueError as e:
+            logger.warning("document_limit_or_format error_type=%s", type(e).__name__)
+            await message.answer("Документ слишком велик или не поддерживается целиком; текст не обработан."
+                                 if lang == "ru" else
+                                 "Document is too large or cannot be fully supported; no text was processed.")
         except Exception as e:
             logger.warning("document_processing_failure error_type=%s", type(e).__name__)
             await message.answer(t(lang, "document_error"))
@@ -2095,24 +2175,45 @@ class TelegramWriterBot:
     async def _extract_txt(self, file_path: str, max_chars: int) -> str:
         """Extract text from TXT file."""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.read(max_chars)
+            with open(file_path, 'r', encoding='utf-8', newline="") as f:
+                text = f.read(max_chars + 1)
         except UnicodeDecodeError:
             # Try with different encoding
-            with open(file_path, 'r', encoding='latin-1') as f:
-                return f.read(max_chars)
+            with open(file_path, 'r', encoding='latin-1', newline="") as f:
+                text = f.read(max_chars + 1)
+        if len(text) > max_chars:
+            raise ValueError("Document exceeds extraction limit")
+        return text
+
+    @staticmethod
+    def _docx_paragraphs(doc):
+        from docx.text.paragraph import Paragraph
+        from docx.table import Table
+        from docx.oxml.ns import qn
+        seen_cells = set()
+        def paragraphs(parent):
+            container = parent.element.body if hasattr(parent, "element") else parent._element
+            for child in container.iterchildren():
+                if child.tag == qn("w:p"):
+                    yield Paragraph(child, parent)
+                elif child.tag == qn("w:tbl"):
+                    for row in Table(child, parent).rows:
+                        for cell in row.cells:
+                            if cell._tc in seen_cells:
+                                continue
+                            seen_cells.add(cell._tc)
+                            yield from paragraphs(cell)
+        yield from paragraphs(doc)
 
     async def _extract_docx(self, file_path: str, max_chars: int) -> str:
-        """Extract text from DOCX file."""
+        """Extract body paragraphs and table cells in document order."""
         doc = Document(file_path)
         text_parts = []
         total_chars = 0
-        
-        for para in doc.paragraphs:
+        for para in self._docx_paragraphs(doc):
             text = para.text
             if total_chars + len(text) > max_chars:
-                text_parts.append(text[:max_chars - total_chars])
-                break
+                raise ValueError("Document exceeds extraction limit")
             text_parts.append(text)
             total_chars += len(text) + 1  # +1 for newline
         
@@ -2126,11 +2227,10 @@ class TelegramWriterBot:
         
         for i, page in enumerate(reader.pages):
             if i >= max_pages:
-                break
+                raise ValueError("Document exceeds page limit")
             text = page.extract_text() or ""
             if total_chars + len(text) > max_chars:
-                text_parts.append(text[:max_chars - total_chars])
-                break
+                raise ValueError("Document exceeds extraction limit")
             text_parts.append(text)
             total_chars += len(text)
         
@@ -2859,36 +2959,23 @@ class TelegramWriterBot:
         if not original_state:
             return
         
-        # Get the original analyzed text for context
-        analyzed_text = self.accumulated_text.get(user_id, "")
+        context = getattr(self, "tool_discussions", {}).get(user_id)
+        if not context or context["state"] != state:
+            await message.answer(t(lang, "error_llm"))
+            return
         
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
         
         try:
-            # Build discussion prompt with context
-            if instr_key:
-                base_instr = t(lang, instr_key)
-                discussion_instr = (
-                    f"{base_instr}\n\n"
-                    f"Original text analyzed: {analyzed_text[:500]}...\n"
-                    f"User is asking about your previous analysis. "
-                    f"Answer their question while maintaining the same analytical perspective."
-                )
-            else:
-                discussion_instr = (
-                    f"Original text: {analyzed_text[:500]}...\n"
-                    f"User is asking about your previous response. "
-                    f"Answer their question while maintaining the same perspective."
-                )
-            
             response = await self._writer_call(
-                user_id, "generate_response", f"User question: {text}",
-                temporary_system_instruction=discussion_instr
+                user_id, "discuss_tool", context["original"], context["result"], text, context["turns"]
             )
             if not response or response.startswith("Error"):
                 await message.answer(t(lang, "error_llm"))
                 return
-            await message.answer(response + f"\n\n{t(lang, 'discuss_mode_hint')}")
+            context["turns"].append({"question": text, "answer": response})
+            context["turns"] = context["turns"][-6:]
+            await self._send_long_message(message, response + f"\n\n{t(lang, 'discuss_mode_hint')}")
             
         except Exception as e:
             logger.warning("discussion_failure error_type=%s", type(e).__name__)
@@ -2904,6 +2991,7 @@ class TelegramWriterBot:
         # If in discussion mode, /done exits to normal chat
         if state in self.DISCUSSION_STATES:
             self.user_states[user_id] = "chat"
+            getattr(self, "tool_discussions", {}).pop(user_id, None)
             if user_id in self.accumulated_text:
                 del self.accumulated_text[user_id]
             await message.answer(t(lang, "discuss_exit"))
