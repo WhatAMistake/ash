@@ -5,6 +5,7 @@ __pycache__/
 data/chromadb_writers/
 data/user_*.json
 data/code_hashes.json
+data/group_context.sqlite3*
 scripts/user_prefs.json
 backup_src/
 .env

@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root / "src"))
 
@@ -101,3 +103,91 @@ def test_lobster_isolated_from_ash_system_prompt():
     assert "Я хочу написать роман" not in all_contents
     assert "Инструкция лобстера" in all_contents
 
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_lobster_voice_and_format_instructions(lang):
+    prompt = t(lang, "instr_lobster")
+    love = t(lang, "instr_lobster_love")
+    assert "---MESSAGE---" in prompt
+    assert "3–5" in prompt
+    assert "Ты — лобстер" not in prompt
+    assert "You are a lobster" not in prompt
+    if lang == "ru":
+        assert all(word in prompt for word in (
+            "маска", "мандрейк", "меланхолия", "радость", "раздражение",
+            "нежность", "сарказм", "не обязательны", "глубокомысленной",
+        ))
+        assert "Аделина" in love and "350" in love
+    else:
+        assert all(word in prompt for word in (
+            "mask", "mandrake", "melancholy", "joy", "irritation",
+            "tenderness", "sarcasm", "not mandatory", "profound",
+        ))
+        assert "Adeline" in love and "350" in love
+
+
+@pytest.mark.parametrize(
+    "output,expected",
+    [
+        ("first\n---MESSAGE---\nsecond\n---MESSAGE---\nthird",
+         ["first", "second", "third"]),
+        ("first\ncontinued\n---MESSAGE---\nsecond\nline\n---MESSAGE---\nthird",
+         ["first\ncontinued", "second\nline", "third"]),
+        ("---MESSAGE---\nfirst---MESSAGE------MESSAGE---second\n---MESSAGE---",
+         ["first", "second"]),
+        ("first\n\nsecond\nthird", ["first", "second", "third"]),
+        ("one sentence. another sentence", ["one sentence. another sentence"]),
+        ("same\n---MESSAGE---\nsame", ["same", "same"]),
+    ],
+)
+def test_lobster_parser_preserves_messages(output, expected):
+    bot = WriterBot(language="en", use_rag=False)
+    with patch("random.random", return_value=0.07), patch.object(
+        bot, "generate_response", return_value=output
+    ) as generate:
+        assert bot.lobster() == expected
+    instruction = generate.call_args.kwargs["temporary_system_instruction"]
+    assert "Starting theme:" in instruction
+    assert "not mandatory" in instruction
+    assert generate.call_args.kwargs["command"] == "lobster"
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+@pytest.mark.parametrize("output", [None, "", "   ", "Error: offline", "  Error: offline", "---MESSAGE---"])
+def test_lobster_regular_fallbacks_are_varied_and_formatted(lang, output):
+    bot = WriterBot(language=lang, use_rag=False)
+    packs = []
+    for index in range(3):
+        with patch("random.random", return_value=0.5), patch(
+            "random.choice", side_effect=lambda choices: choices[index]
+        ), patch.object(bot, "generate_response", return_value=output):
+            packs.append(bot.lobster())
+    assert len({tuple(pack) for pack in packs}) == 3
+    for pack in packs:
+        assert 3 <= len(pack) <= 5
+        assert all(message and message == message.lower() and not message.endswith(".")
+                   and "---MESSAGE---" not in message and "\n" not in message for message in pack)
+    assert any("мандрейк" in line if lang == "ru" else "mandrake" in line
+               for pack in packs for line in pack)
+
+
+@pytest.mark.parametrize("lang,name", [("ru", "аделина"), ("en", "adeline")])
+@pytest.mark.parametrize("output", [None, "", "   ", "Error: offline"])
+def test_lobster_love_fallback(lang, name, output):
+    bot = WriterBot(language=lang, use_rag=False)
+    with patch("random.random", return_value=0.069999), patch.object(
+        bot, "generate_response", return_value=output
+    ) as generate:
+        messages = bot.lobster()
+    assert len(messages) == 1 and name in messages[0].lower()
+    assert generate.call_args.kwargs["command"] == "lobster"
+    assert "350" in generate.call_args.kwargs["temporary_system_instruction"]
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_lobster_love_success_is_one_letter(lang):
+    bot = WriterBot(language=lang, use_rag=False)
+    with patch("random.random", return_value=0.0), patch.object(
+        bot, "generate_response", return_value="  a love letter  "
+    ):
+        assert bot.lobster() == ["a love letter"]
