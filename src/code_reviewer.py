@@ -39,7 +39,7 @@ EXISTING_COMMANDS = [
     "character", "dialogue", "prompt", "idea", "feedback", "style", "roast",
     "praise", "corrector", "editor", "count_me", "stats", "lobster", "pun",
     "xyx", "methodique", "methodichque", "cite", "cite_off", "cite_on",
-    "cite_when", "summary", "cry_baby", "dev_feedback", "done",
+    "cite_when", "summary", "cry_baby", "dev_feedback", "done", "cancel",
     "confo_enable37", "upload", "admin", "debug",
 ]
 

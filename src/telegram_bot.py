@@ -113,6 +113,8 @@ except ImportError:
 
 from writer_bot import WriterBot
 from editorial_tools import correction_changes
+from chat_scope import ChatScopedDict, current_group
+from telegram_commands import command_help, descriptions
 from async_execution import AsyncExecution
 from lang_utils import detect_language
 from i18n import t
@@ -279,16 +281,16 @@ class TelegramWriterBot:
         self.bot = Bot(token=telegram_token)
         self.dp = Dispatcher()
         self.execution = AsyncExecution()
-        self.sessions: dict[int, WriterBot] = {}
+        self.sessions = ChatScopedDict()
         self.secretary_sessions: dict[tuple[str, int], WriterBot] = {}
         self.business_connections: dict[str, object] = {}
         self.secretary_last_alert_at: dict[tuple[str, int], datetime] = {}
         self.user_langs: dict[int, str] = {}
-        self.user_states: dict[int, str] = {}
+        self.user_states = ChatScopedDict()
         self.last_user_message: dict[int, str] = {}
-        self.accumulated_text: dict[int, str] = {}  # For multi-message input
-        self.tool_discussions = {}
-        self.uploaded_documents = {}
+        self.accumulated_text = ChatScopedDict()  # For multi-message input
+        self.tool_discussions = ChatScopedDict()
+        self.uploaded_documents = ChatScopedDict()
         
         # Error tracking for spam protection
 
@@ -403,6 +405,19 @@ class TelegramWriterBot:
             print(f"Bot started: @{self.bot_username} (ID: {self.bot_user_id})")
         except Exception as e:
             logger.warning("bot_info_failure error_type=%s", type(e).__name__)
+
+        # BotFather's static menu can drift; publish the same catalogue as /help.
+        try:
+            for lang in ("en", "ru"):
+                commands = [types.BotCommand(command=name, description=description)
+                            for name, description in descriptions(lang)]
+                await self.bot.set_my_commands(commands, language_code=lang)
+            await self.bot.set_my_commands(
+                [types.BotCommand(command=name, description=description)
+                 for name, description in descriptions(DEFAULT_LANG)]
+            )
+        except Exception as exc:
+            logger.warning("command_menu_update_failure error_type=%s", type(exc).__name__)
         
         await self._check_and_notify_updates()
 
@@ -493,8 +508,8 @@ class TelegramWriterBot:
         if not text:
             return ""
         pattern = rf"^/{re.escape(command)}(?:@\S+)?(?:\s+|$)"
-        cleaned = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE).strip()
-        return cleaned
+        match = re.match(pattern, text, flags=re.IGNORECASE)
+        return text[match.end():].strip() if match else ""
 
     def _touch_user_activity(self, user_id: int) -> None:
         """Record user activity for cite auto-disable and prefs."""
@@ -614,6 +629,8 @@ class TelegramWriterBot:
         self.user_states[user_id] = "chat"
         if clear_accumulated and user_id in self.accumulated_text:
             del self.accumulated_text[user_id]
+        getattr(self, "tool_discussions", {}).pop(user_id, None)
+        getattr(self, "uploaded_documents", {}).pop(user_id, None)
         await self._send_long_message(
             message,
             reply,
@@ -1088,8 +1105,15 @@ class TelegramWriterBot:
             user = message.from_user
             if user is None:
                 return
+            async def scoped_handler():
+                chat = message.chat.id if message.chat.type in ("group", "supergroup") else None
+                token = current_group.set(chat)
+                try:
+                    await handler(message)
+                finally:
+                    current_group.reset(token)
             try:
-                await self.execution.serialized(("user", user.id), handler, message)
+                await self.execution.serialized(("user", user.id), scoped_handler)
             except Exception as exc:
                 logger.warning("telegram_handler_failure error_type=%s", type(exc).__name__)
                 await message.answer(t(self.user_langs.get(user.id, DEFAULT_LANG), "error_llm"))
@@ -1223,6 +1247,10 @@ class TelegramWriterBot:
         async def cmd_done(message: types.Message):
             await _run(self._handle_done, message)
 
+        @self.dp.message(Command("cancel"))
+        async def cmd_cancel(message: types.Message):
+            await _run(self._handle_cancel, message)
+
         @self.dp.message(Command("confo_enable37"))
         async def cmd_confo_enable37(message: types.Message):
             await self.execution.serialized(("user", message.from_user.id), self._handle_confo_toggle, message)
@@ -1315,6 +1343,9 @@ class TelegramWriterBot:
         chat_id = message.chat.id
         name = message.from_user.first_name or "Writer"
         self.user_states[user_id] = "chat"
+        self.accumulated_text.pop(user_id, None)
+        getattr(self, "tool_discussions", {}).pop(user_id, None)
+        getattr(self, "uploaded_documents", {}).pop(user_id, None)
         
         # Set language from Telegram locale on first start, but don't override saved preference
         tg_lang = (message.from_user.language_code or "").lower()
@@ -1338,7 +1369,8 @@ class TelegramWriterBot:
         self._touch_user_activity(user_id)
 
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
-        welcome = t(lang, "welcome", name=name)
+        welcome = (f"Привет, {name}. Я Эш.\n\n" if lang == "ru" else
+                   f"Hi, {name}. I'm Ash.\n\n") + command_help(lang)
 
         await message.answer(welcome, reply_markup=get_main_keyboard(lang))
 
@@ -1348,7 +1380,7 @@ class TelegramWriterBot:
         user_id = message.from_user.id
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
         self._touch_user_activity(user_id)
-        await message.answer(t(lang, "help"), reply_markup=get_main_keyboard(lang))
+        await message.answer(command_help(lang), reply_markup=get_main_keyboard(lang))
 
     async def _handle_lang(self, message: types.Message):
         """Handle /lang command - set or show language (copied from therapist bot)."""
@@ -1401,17 +1433,38 @@ class TelegramWriterBot:
         user_id = message.from_user.id
         if user_id in self.sessions:
             self.sessions[user_id].reset()
+        if user_id == ADMIN_ID and self.user_states.get(user_id, "").startswith("update_"):
+            self._clear_pending_update(user_id)
         self.user_states[user_id] = "chat"
         getattr(self, "tool_discussions", {}).pop(user_id, None)
         getattr(self, "uploaded_documents", {}).pop(user_id, None)
         if user_id in self.accumulated_text:
             del self.accumulated_text[user_id]
+        if message.chat.type == "private":
+            getattr(self, "last_user_message", {}).pop(user_id, None)
+        else:
+            getattr(self, "group_last_user_message", {}).pop((message.chat.id, user_id), None)
         # Reset word and character stats
         reset_stats(user_id)
         self._touch_user_activity(user_id)
         
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
         await message.answer(t(lang, "reset_confirm"), reply_markup=get_main_keyboard(lang))
+
+    async def _handle_cancel(self, message: types.Message):
+        """Cancel only the current workflow, without resetting chat or statistics."""
+        user_id = message.from_user.id
+        lang = self.user_langs.get(user_id, DEFAULT_LANG)
+        if user_id == ADMIN_ID and self.user_states.get(user_id, "").startswith("update_"):
+            self._clear_pending_update(user_id)
+        self.user_states[user_id] = "chat"
+        self.accumulated_text.pop(user_id, None)
+        getattr(self, "tool_discussions", {}).pop(user_id, None)
+        getattr(self, "uploaded_documents", {}).pop(user_id, None)
+        await message.answer(
+            "Текущий сценарий отменён." if lang == "ru" else "Current workflow cancelled.",
+            reply_markup=get_main_keyboard(lang),
+        )
 
     async def _handle_block(self, message: types.Message):
 
@@ -1502,7 +1555,7 @@ class TelegramWriterBot:
         text = self._command_args(message, "feedback")
         if len(text) < 20:
             self.user_states[user_id] = "feedback"
-            self.accumulated_text[user_id] = ""  # Start accumulation
+            self.accumulated_text[user_id] = text
             await message.answer(t(lang, "feedback_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -1529,7 +1582,7 @@ class TelegramWriterBot:
         text = self._command_args(message, "style")
         if len(text) < 20:
             self.user_states[user_id] = "style"
-            self.accumulated_text[user_id] = ""  # Start accumulation
+            self.accumulated_text[user_id] = text
             await message.answer(t(lang, "style_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -1556,7 +1609,7 @@ class TelegramWriterBot:
         text = self._command_args(message, "roast")
         if len(text) < 50:
             self.user_states[user_id] = "roast"
-            self.accumulated_text[user_id] = ""  # Start accumulation
+            self.accumulated_text[user_id] = text
             await message.answer(t(lang, "roast_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -1583,7 +1636,7 @@ class TelegramWriterBot:
         text = self._command_args(message, "praise")
         if len(text) < 50:
             self.user_states[user_id] = "praise"
-            self.accumulated_text[user_id] = ""  # Start accumulation
+            self.accumulated_text[user_id] = text
             await message.answer(t(lang, "praise_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -1610,7 +1663,7 @@ class TelegramWriterBot:
         text = self._command_args(message, "corrector")
         if len(text) < 3:
             self.user_states[user_id] = "corrector_wait"
-            self.accumulated_text[user_id] = ""  # Start accumulation
+            self.accumulated_text[user_id] = text
             await message.answer(t(lang, "corrector_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -1637,7 +1690,7 @@ class TelegramWriterBot:
         text = self._command_args(message, "editor")
         if len(text) < 5:
             self.user_states[user_id] = "editor_wait"
-            self.accumulated_text[user_id] = ""  # Start accumulation
+            self.accumulated_text[user_id] = text
             await message.answer(t(lang, "editor_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -2269,7 +2322,7 @@ class TelegramWriterBot:
         
         if len(text) < 5:
             self.user_states[user_id] = "methodique_wait"
-            self.accumulated_text[user_id] = ""  # Start accumulation
+            self.accumulated_text[user_id] = text
             await message.answer(t(lang, "methodichque_prompt"))
             return
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -2377,7 +2430,7 @@ class TelegramWriterBot:
             )
             return
 
-        self.accumulated_text[user_id] = ""
+        self.accumulated_text[user_id] = inline_text
         self.user_states[user_id] = "summary_wait"
 
         await message.answer(t(lang, "summary_prompt"))
@@ -2661,7 +2714,7 @@ class TelegramWriterBot:
         
         # Get text from message, handling both direct command and accumulated text
         raw_text = (message.text or "").strip()
-        text = raw_text.replace("/dev_feedback", "").strip()
+        text = self._command_args(message, "dev_feedback")
         
         # Debug info
         print(f"dev_feedback: user={user_id}, text_len={len(text)}, raw_len={len(raw_text)}")
@@ -2738,6 +2791,13 @@ class TelegramWriterBot:
             if await self._handle_summary_choice(message, text):
                 return
         # ===== END SUMMARY BUTTONS CHECK =====
+
+        if state == self.SUMMARY_FORMAT_STATE:
+            await message.answer(t(lang, "summary_choose_format"))
+            return
+        if state == "upload_wait":
+            await message.answer(t(lang, "upload_prompt"))
+            return
         
         # ===== TEXT ACCUMULATION =====
         # Check if we need to accumulate text for waiting states
@@ -2856,7 +2916,7 @@ class TelegramWriterBot:
                 if not reply or reply.startswith("Error"):
                     reply = t(lang, "error_llm")
             elif text in ("Команды", "Commands"):
-                reply = t(lang, "help")
+                reply = command_help(lang)
             elif text in ("Промпт", "Prompt"):
                 await self._handle_prompt(message)
                 return
@@ -3015,6 +3075,9 @@ class TelegramWriterBot:
         if state == "summary_wait":
             if not full_text:
                 await message.answer(t(lang, "no_text_accumulated"))
+                return
+            if len(full_text.strip()) < self.STATE_CONFIG["summary_wait"][0]:
+                await message.answer(t(lang, "text_too_short", min=self.STATE_CONFIG["summary_wait"][0]))
                 return
             
             # Show buttons for format choice

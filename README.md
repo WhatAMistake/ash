@@ -14,6 +14,8 @@ A Telegram bot for writers: creative block, ideas, exercises, feedback, and styl
 | `/prompt`  | Random writing prompt          |
 | `/idea`    | Random idea (genre + setting + conflict) |
 | `/feedback` | Constructive critique of your text (send excerpt) |
+| `/roast`   | Sharp, ironic roast of the text |
+| `/praise`  | Reasoned praise of the text |
 | `/style`   | Analyze style of excerpt       |
 | `/reset`   | Reset chat                     |
 | `/lang`    | Switch language (ru / en)      |
@@ -23,6 +25,38 @@ A Telegram bot for writers: creative block, ideas, exercises, feedback, and styl
 | `/help`    | Command list                   |
 
 ...and much more!
+
+The full public catalogue is available in `/help` and the Telegram command
+menu (published at startup in English and Russian). `/methodichque` remains a
+supported alias for `/methodique`. The playful `/lobster`, `/xyx`, `/pun`,
+`/cry_baby`, `/idea`, and `/prompt` are intentional parts of Ash.
+The [command audit](docs/command-audit.md) lists coverage and limitations.
+
+### Working with text and files
+
+Put text after a tool command, or send it in several messages and use `/done`.
+After feedback, roast, praise, style, corrector, editor, methodique or summary,
+ask follow-up questions; `/done` leaves discussion mode. `/cancel` discards
+the current workflow and restores the main keyboard without clearing chat
+history or statistics. `/reset` also resets the writer session and the user's
+word/character statistics. Starting another tool replaces a pending draft.
+
+Send TXT, DOCX or PDF (up to 20 MB), then choose a listed tool. PDF is limited
+to 500 pages and 500,000 extracted characters, TXT to 500,000 characters, and
+DOCX to 300,000; DOCX extraction covers body paragraphs and tables, not headers
+or notes. Corrected PDF is returned as text; changed DOCX paragraphs may lose
+formatting, and complex changed paragraphs fall back to TXT. Files are processed
+using temporary local files. An `/idea` reference uses a separate inline
+keyboard: it does not replace the main reply keyboard; choices expire after
+24 hours or a process restart.
+
+Private and group tool drafts, discussions, uploads and writer sessions are
+scoped separately per user and group. In groups, follow up by replying to Ash
+or mentioning it; group documents likewise need a reply or mention. Language,
+quote preferences and writing statistics remain per user across chats, so
+`/reset` resets those statistics across chats. Group reply history and retention
+are described in [group-context.md](docs/group-context.md). Workflow state is
+in memory and does not survive a restart.
 
 ## Setup
 
@@ -49,6 +83,14 @@ A Telegram bot for writers: creative block, ideas, exercises, feedback, and styl
    runs in bounded worker threads; messages for the same user are serialized.
    LLM completion logs contain only outcome, duration, and error type, not
    prompts, documents, credentials, or provider error messages.
+
+   Set `ADMIN_ID` for admin commands and `/dev_feedback` (which currently sends
+   to `ADMIN_ID`, not `DEV_ID`). `/admin` broadcasts only after confirmation;
+   `/debug` and `/confo_enable37` are admin-only. Telegram Business secretary
+   mode is disabled by default; enable `SECRETARY_ENABLED` only for the
+   configured owner and set `SECRETARY_HUMAN_TAKEOVER_HOURS` as needed. Business
+   sessions and updates are separate from the regular writer flow. Protect
+   `.env`, runtime data and backups; never commit credentials.
 
 5. Run the mocked tests with `python -m pytest`. No live Telegram or LLM API is required.
 
