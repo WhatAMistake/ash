@@ -58,6 +58,51 @@ async def test_preview_contains_edit_option():
 
 
 @pytest.mark.asyncio
+async def test_missing_russian_changelog_is_translated_before_preview(monkeypatch):
+    bot, tb = _make_bot()
+    bot.llm_model = "test-model"
+    bot.llm_api_key = "test-key"
+    bot.llm_api_base = "https://example.invalid"
+    writer = MagicMock()
+    monkeypatch.setattr(tb, "WriterBot", lambda **kwargs: writer)
+    generate = MagicMock(side_effect=[None, "• Fixed help"])
+    translate = MagicMock(return_value="• Исправлена справка")
+    save = MagicMock()
+    monkeypatch.setattr(tb, "check_and_generate_changelog", generate)
+    monkeypatch.setattr(tb, "translate_changelog_with_llm", translate)
+    monkeypatch.setattr(tb, "save_current_hashes", save)
+
+    async def run(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    bot.execution.run = run
+    await tb.TelegramWriterBot._check_and_notify_updates(bot)
+    translate.assert_called_once_with(writer, "• Fixed help", "ru")
+    assert bot.pending_update_changelogs == {"ru": "• Исправлена справка", "en": "• Fixed help"}
+    save.assert_called_once()
+
+
+def test_preview_warns_when_translation_is_missing():
+    bot, _ = _make_bot()
+    preview = bot._format_update_preview({"ru": "", "en": "• Fixed help"})
+    assert "Не удалось подготовить обе версии" in preview
+    assert "править" in preview
+
+
+@pytest.mark.asyncio
+async def test_broadcast_uses_each_users_language(monkeypatch):
+    bot, tb = _make_bot()
+    bot.pending_update_changelogs = {"ru": "• Исправлена справка", "en": "• Fixed help"}
+    monkeypatch.setattr(tb, "init_cache", MagicMock())
+    await tb.TelegramWriterBot._process_update_broadcast(bot)
+    messages = {call.args[0]: call.args[1] for call in bot.send_long_message.await_args_list
+                if len(call.args) > 1 and ("Исправлена справка" in call.args[1] or "Fixed help" in call.args[1])}
+    assert "Исправлена справка" in messages[42]
+    assert "Fixed help" in messages[7]
+    assert not hasattr(bot, "pending_update_changelogs")
+
+
+@pytest.mark.asyncio
 async def test_edit_flow_saves_ru_then_en_and_returns_to_confirm():
     bot, _ = _make_bot()
     bot.user_states[42] = "update_confirm"

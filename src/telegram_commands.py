@@ -1,4 +1,4 @@
-"""Public command catalogue shared by Telegram's menu and Ash's help."""
+"""Public command catalogue used by Telegram's menu."""
 
 # Command, English description, Russian description. Keep distinct voices visible.
 COMMANDS = (
@@ -30,7 +30,7 @@ COMMANDS = (
     ("xyx", "Хух", "Хух"),
     ("pun", "Pun on a reply or last message", "Каламбур по ответу или последнему сообщению"),
     ("cry_baby", "Have a cry", "Поплакать"),
-    ("cite", "Unverified writer quote", "Непроверенная цитата писателя"),
+    ("cite", "Writer quote", "Цитата писателя"),
     ("cite_on", "Enable daily quotes", "Включить ежедневные цитаты"),
     ("cite_off", "Disable daily quotes", "Отключить ежедневные цитаты"),
     ("cite_when", "When is the next quote?", "Когда следующая цитата?"),

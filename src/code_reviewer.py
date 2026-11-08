@@ -372,9 +372,10 @@ _TECHNICAL_RE = re.compile(
 )
 _ANALYSIS_PREFIX_RE = re.compile(
     r"(?ix)^(?:"
-    r"looking at|let me|i (?:will|need to|see|notice|think)|"
-    r"the (?:diff|change|file|code)|this (?:diff|change|file|update)|"
-    r"смотрю|давайте|анализ|рассужд|в файле|в диффе"
+    r"looking\s+at|let\s+me|i\s+(?:will|need\s+to|see|notice|think|should)|"
+    r"the\s+(?:diff|change|file|code)|this\s+(?:diff|change|file|update)|"
+    r"смотрю|давайте|анализ|рассужд|в\s+файле|в\s+диффе|"
+    r"я\s+(?:думаю|вижу|заметил|проанализирую|должен)|нужно|следует"
     r")"
 )
 MAX_CHANGELOG_BULLETS = 3
@@ -426,9 +427,14 @@ def _sanitize_changelog(text: str) -> str:
     has_explicit_bullets = any(
         re.match(r"^(?:[-*•]|—|\d+[.)])\s+", raw) for raw in raw_lines
     )
-    # Several unmarked lines are leftover reasoning, not a release note.
+    # Some models omit markers despite the prompt. Accept only a few short,
+    # non-technical lines; keep multi-line analysis dumps out of the broadcast.
     if not has_explicit_bullets and len(raw_lines) > 1:
-        return ""
+        if len(raw_lines) > MAX_CHANGELOG_BULLETS or any(
+            len(line) > MAX_BULLET_CHARS or _looks_technical(line)
+            for line in raw_lines
+        ):
+            return ""
 
     bullets: List[str] = []
     for raw in raw_lines:
@@ -503,7 +509,7 @@ def generate_changelog_with_llm(
 1) Только то, что человек заметит в боте: новые/починенные команды, ответы, тексты, режимы.
 2) Игнорируй код, рефакторинг, импорты, хеши, логи, внутренние функции.
 3) Если видимых изменений нет — верни ровно: НЕТ
-4) 1–3 очень коротких пункта. Без вступлений, без анализа, без markdown.
+4) 1–3 очень коротких пункта, каждый на отдельной строке и начинается с «• ». Без вступлений, без анализа.
 5) Не называй «новой» команду из списка известных, если она лишь правилась.
 6) Не пиши ход мыслей, не цитируй diff, не называй файлы и функции.
 7) Тон: конкретный и едкий, как у старого редактора.
@@ -529,7 +535,7 @@ Rules:
 1) Only what a person will notice in the bot: new/fixed commands, replies, copy, modes.
 2) Ignore code, refactoring, imports, hashes, logs, internal helpers.
 3) If there are no user-visible changes — return exactly: NONE
-4) 1–3 very short bullets. No preamble, no analysis, no markdown.
+4) 1–3 very short bullets, each on its own line starting with "• ". No preamble or analysis.
 5) Do not call a command "new" if it only appears in the known list and was merely edited.
 6) Do not show your reasoning, quote the diff, or name files and functions.
 7) Tone: specific and cynical, like an old editor.
@@ -557,7 +563,7 @@ Return only the finished bullets or NONE. No reasoning."""
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.15,
-                max_tokens=180,
+                max_tokens=450,
             )
             changelog = _sanitize_changelog(_extract_completion_text(response))
             if not changelog:
@@ -580,6 +586,38 @@ Return only the finished bullets or NONE. No reasoning."""
 
     # No reliable user-facing signal — stay silent instead of inventing noise
     return ""
+
+
+def translate_changelog_with_llm(writer_bot, changelog: str, lang: str) -> str:
+    """Translate an existing release note when generation missed one language."""
+    if not changelog or lang not in ("ru", "en") or not getattr(writer_bot, "client", None):
+        return ""
+    # Do not turn the other language's witty intro into an invented change.
+    bullets = [line for line in changelog.splitlines() if line.lstrip().startswith("• ")]
+    if not bullets:
+        return ""
+    target = "Russian" if lang == "ru" else "English"
+    try:
+        response = create_chat_completion(
+            writer_bot.client,
+            model=writer_bot.model,
+            messages=[
+                {"role": "system", "content": (
+                    f"Translate these release notes into {target}. Preserve their meaning and commands, "
+                    "do not add changes, and output only short bullets, each starting with '• '."
+                )},
+                {"role": "user", "content": "\n".join(bullets)},
+            ],
+            temperature=0.1,
+            max_tokens=450,
+        )
+        translated = _sanitize_changelog(_extract_completion_text(response))
+        if not translated or (lang == "ru" and not re.search(r"[А-Яа-яЁё]", translated)):
+            return ""
+        return f"{get_witty_comment(len(bullets), lang)}\n\n{translated}"
+    except Exception as e:
+        print(f"LLM changelog translation failed: {type(e).__name__}")
+        return ""
 
 
 def generate_user_friendly_fallback(analysis: Dict, lang: str = "ru") -> str:
@@ -676,8 +714,9 @@ def check_and_generate_changelog(
 
         # First run / empty cache: baseline silently, do not invent a release.
         if not stored_hashes:
-            print("[CHANGELOG] No baseline hashes — saving baseline, no changelog")
-            save_current_hashes(project_root)
+            print("[CHANGELOG] No baseline hashes — no changelog")
+            if should_save_hashes:
+                save_current_hashes(project_root)
             return None
 
         changed_files = get_changed_files(project_root, stored_hashes)

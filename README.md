@@ -26,8 +26,9 @@ A Telegram bot for writers: creative block, ideas, exercises, feedback, and styl
 
 ...and much more!
 
-The full public catalogue is available in `/help` and the Telegram command
-menu (published at startup in English and Russian). `/methodichque` remains a
+The Telegram command menu contains the full public catalogue (published at
+startup in English and Russian); `/help` shows the original grouped guide.
+`/methodichque` remains a
 supported alias for `/methodique`. The playful `/lobster`, `/xyx`, `/pun`,
 `/cry_baby`, `/idea`, and `/prompt` are intentional parts of Ash.
 The [command audit](docs/command-audit.md) lists coverage and limitations.
@@ -124,9 +125,8 @@ ordinary roleplay or non-writing topics as attacks. A good answer need not
 contain a joke. Compare several runs: model behavior is probabilistic and
 passing offline checks does not establish that a live model will follow them.
 
-The legacy `/cite` collection has not been source-verified; its outputs are
-explicitly labelled unverified, and no LLM-generated attribution is used as a
-fallback.
+`/cite` uses the local quote collection and does not fall back to an
+LLM-generated attribution.
 
 ## RAG (books)
 

@@ -74,6 +74,25 @@ def test_public_catalogue_matches_registered_handlers_and_keeps_three_tones():
         assert "/methodichque" in help_text
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lang", ["ru", "en"])
+async def test_start_and_help_use_original_localized_text(lang):
+    b = bot()
+    b.user_langs[7] = lang
+    b.user_cite_enabled = {}
+    b.user_cite_last_time = {}
+    b._save_user_prefs = MagicMock()
+    message = msg("/start")
+    message.from_user.first_name = "Alex"
+    message.from_user.language_code = lang
+    await b._handle_start(message)
+    assert message.answer.await_args.args[0] == tb.t(lang, "welcome", name="Alex")
+    await b._handle_help(message)
+    assert message.answer.await_args.args[0] == tb.t(lang, "help")
+    await callbacks(b)["btn_help"](message)
+    assert message.answer.await_args.args[0] == tb.t(lang, "help")
+
+
 def test_command_filters_are_unique_and_alias_is_registered():
     b = bot()
     found = {}

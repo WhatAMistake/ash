@@ -20,6 +20,7 @@ from code_reviewer import (
     get_changed_files,
     load_stored_hashes,
     save_current_hashes,
+    translate_changelog_with_llm,
 )
 
 
@@ -58,6 +59,14 @@ def test_first_run_baselines_silently(tmp_path, monkeypatch):
     assert result is None
     hashes = load_stored_hashes(tmp_path / "data")
     assert "src/telegram_bot.py" in hashes
+
+
+def test_first_run_defers_baseline_when_requested(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "telegram_bot.py").write_text("hello", encoding="utf-8")
+    monkeypatch.setattr("code_reviewer.TRACKED_FILES", ["src/telegram_bot.py"])
+    assert check_and_generate_changelog(tmp_path, None, 0, "ru", should_save_hashes=False) is None
+    assert not load_stored_hashes(tmp_path / "data")
 
 
 def test_fallback_stays_silent_without_new_commands():
@@ -123,6 +132,12 @@ def test_drops_unmarked_reasoning_dump():
     assert _sanitize_changelog(raw) == ""
 
 
+def test_accepts_short_unmarked_russian_changelog_without_analysis():
+    raw = "Исправлена справка.\nОбновлены подсказки."
+    assert _sanitize_changelog(raw) == "• Исправлена справка.\n• Обновлены подсказки."
+    assert _sanitize_changelog("Я думаю, здесь была ошибка.\nИсправлена справка.") == ""
+
+
 def test_extract_completion_ignores_reasoning_fields():
     message = SimpleNamespace(
         content="• Fixed the help text",
@@ -183,3 +198,44 @@ def test_generate_changelog_sanitizes_model_output():
     create_kwargs = client.chat.completions.create.call_args.kwargs
     assert create_kwargs["extra_body"]["thinking"] == {"type": "disabled"}
     assert create_kwargs["extra_body"]["reasoning_effort"] == "none"
+
+
+def test_generate_russian_changelog_from_unmarked_model_output():
+    client = MagicMock()
+    client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(
+            content="Исправлена справка.\nОбновлены подсказки."
+        ))]
+    )
+    writer = SimpleNamespace(client=client, model="test-model")
+    change_set = {
+        "file_diffs": [{"path": "src/i18n.py", "diff": "+ help"}],
+        "new_commands": [], "has_user_signal": True, "changed_files_count": 1,
+    }
+    result = generate_changelog_with_llm(writer, [], project_root, "ru", change_set)
+    assert "• Исправлена справка." in result
+    assert "• Обновлены подсказки." in result
+
+
+def test_translate_missing_russian_changelog_without_copying_intro():
+    client = MagicMock()
+    client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="• Исправлена справка"))]
+    )
+    writer = SimpleNamespace(client=client, model="test-model")
+    result = translate_changelog_with_llm(writer, "A joke\n\n• Fixed the help text", "ru")
+    assert "Исправлена справка" in result
+    request = client.chat.completions.create.call_args.kwargs
+    assert request["messages"][1]["content"] == "• Fixed the help text"
+    assert request["max_tokens"] >= 450
+    client.chat.completions.create.return_value.choices[0].message.content = "• Fixed the help text"
+    assert translate_changelog_with_llm(writer, "• Fixed the help text", "ru") == ""
+
+
+def test_translate_changelog_fails_silently_without_inventing_text():
+    client = MagicMock()
+    client.chat.completions.create.side_effect = RuntimeError("offline")
+    writer = SimpleNamespace(client=client, model="test-model")
+    assert translate_changelog_with_llm(writer, "• Fixed help", "ru") == ""
+    assert translate_changelog_with_llm(writer, "", "ru") == ""
+    assert translate_changelog_with_llm(writer, "• Fixed help", "fr") == ""

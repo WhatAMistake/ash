@@ -927,11 +927,9 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
                     
                     item = random.choice(items)
                     if isinstance(item, dict):
-                        writer = item.get("writer", "Unknown")
-                        label = "цитата и атрибуция не проверены" if self.language == "ru" else "quote and attribution unverified"
-                        return (item.get("quote", ""), f"{writer} ({label})")
+                        return (item.get("quote", ""), item.get("writer", "Unknown"))
                     if isinstance(item, str):
-                        return (item, "Источник не проверен" if self.language == "ru" else "Source unverified")
+                        return (item, "Unknown")
             except Exception as e:
                 logger.warning("cite_load_failure error_type=%s", type(e).__name__)
         # Fallback: localized quotes from i18n
@@ -939,9 +937,7 @@ IMPORTANT: Clean text only. No asterisks, no emojis, no decorative elements, no 
         if fallback_quotes and isinstance(fallback_quotes, list) and fallback_quotes:
             item = random.choice(fallback_quotes)
             if isinstance(item, dict):
-                writer = item.get("writer", "Unknown")
-                label = "цитата и атрибуция не проверены" if self.language == "ru" else "quote and attribution unverified"
-                return (item.get("quote", ""), f"{writer} ({label})")
+                return (item.get("quote", ""), item.get("writer", "Unknown"))
         # Never generate a quotation and attach an invented author.
         if self.language == "ru":
             return ("Цитата недоступна", "Источник не установлен")

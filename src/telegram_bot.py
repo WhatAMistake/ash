@@ -120,12 +120,16 @@ from writer_bot import WriterBot, Message as WriterMessage
 from editorial_tools import correction_changes
 from group_context import GroupContextStore
 from chat_scope import ChatScopedDict, current_group
-from telegram_commands import command_help, descriptions
+from telegram_commands import descriptions
 from async_execution import AsyncExecution
 from lang_utils import detect_language
 from i18n import t
 from word_stats import add_word_count, get_stats, count_words, count_chars, reset_stats
-from code_reviewer import check_and_generate_changelog, save_current_hashes
+from code_reviewer import (
+    check_and_generate_changelog,
+    save_current_hashes,
+    translate_changelog_with_llm,
+)
 
 # Import init_cache functionality for auto-updating after restart
 import sys
@@ -1505,8 +1509,7 @@ class TelegramWriterBot:
         self._touch_user_activity(user_id)
 
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
-        welcome = (f"Привет, {name}. Я Эш.\n\n" if lang == "ru" else
-                   f"Hi, {name}. I'm Ash.\n\n") + command_help(lang)
+        welcome = t(lang, "welcome", name=name)
 
         await message.answer(welcome, reply_markup=get_main_keyboard(lang))
 
@@ -1516,7 +1519,7 @@ class TelegramWriterBot:
         user_id = message.from_user.id
         lang = self.user_langs.get(user_id, DEFAULT_LANG)
         self._touch_user_activity(user_id)
-        await message.answer(command_help(lang), reply_markup=get_main_keyboard(lang))
+        await message.answer(t(lang, "help"), reply_markup=get_main_keyboard(lang))
 
     async def _handle_lang(self, message: types.Message):
         """Handle /lang command - set or show language (copied from therapist bot)."""
@@ -2082,6 +2085,10 @@ class TelegramWriterBot:
             return safe
 
         recipients = len(self.all_users) or len(self.user_langs)
+        missing_warning = (
+            ["", "⚠️ Не удалось подготовить обе версии. Выберите «править», чтобы заполнить недостающий текст."]
+            if not changelog_ru or not changelog_en else []
+        )
         return "\n".join([
             "📋 <b>Предпросмотр обновления</b>",
             "",
@@ -2092,6 +2099,7 @@ class TelegramWriterBot:
             "",
             "<b>EN:</b>",
             _clip(changelog_en),
+            *missing_warning,
             "",
             "Отправить?",
             "• <b>да</b> — разослать как есть",
@@ -2306,6 +2314,14 @@ class TelegramWriterBot:
             changelog_en = await self.execution.run(check_and_generate_changelog,
                 project_root, wb, self.admin_id, "en", should_save_hashes=False
             )
+            if not changelog_ru and changelog_en:
+                changelog_ru = await self.execution.run(
+                    translate_changelog_with_llm, wb, changelog_en, "ru"
+                )
+            elif not changelog_en and changelog_ru:
+                changelog_en = await self.execution.run(
+                    translate_changelog_with_llm, wb, changelog_ru, "en"
+                )
 
             # Always refresh hash+snapshot baseline after a check.
             # Otherwise technical-only diffs re-fire on every restart.
@@ -3173,7 +3189,7 @@ class TelegramWriterBot:
                 if not reply or reply.startswith("Error"):
                     reply = t(lang, "error_llm")
             elif text in ("Команды", "Commands"):
-                reply = command_help(lang)
+                reply = t(lang, "help")
             elif text in ("Промпт", "Prompt"):
                 await self._handle_prompt(message)
                 return

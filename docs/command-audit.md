@@ -25,7 +25,7 @@ Model-backed commands depend on the configured provider and may fail or vary.
 | Command | Purpose | Status | Tests | Limitations |
 |---|---|---|---|---|
 | `/start` | Welcome and keyboard | Registered | Route | Enables quotes for new users; also clears current workflow |
-| `/help` | Command catalogue | Registered | Route/catalogue | Menu publication requires Telegram access |
+| `/help` | Grouped command guide | Registered | Route | The Telegram menu lists the full public catalogue |
 | `/lang` | Show/set language | Registered | Route | ru/en; preference is per user |
 | `/switchlang` | Toggle language | Registered | Route | Preference is per user |
 | `/reset` | Reset session, workflow and stats | Registered | Serialization | Stats are shared across chats for the user |
@@ -53,7 +53,7 @@ Model-backed commands depend on the configured provider and may fail or vary.
 | `/xyx` | Хух | Registered | Behavior | Also posted automatically in active groups |
 | `/pun` | Pun on replied-to or last message | Registered | Behavior | Needs a suitable prior message |
 | `/cry_baby` | Crying interaction | Registered | Route | Next message completes interaction |
-| `/cite` | Writer quote | Registered | Behavior | Legacy quote corpus is unverified |
+| `/cite` | Writer quote | Registered | Behavior | Uses the local quote corpus |
 | `/cite_on` | Enable quotes | Registered | Route | Quotes are checked during activity, not a timed scheduler |
 | `/cite_off` | Disable quotes | Registered | Route | Per-user preference |
 | `/cite_when` | Quote timing | Registered | Route | Approximate; depends on subsequent activity |

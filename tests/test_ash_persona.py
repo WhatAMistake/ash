@@ -69,14 +69,19 @@ def test_command_instructions_do_not_invent_experience_or_quotes(bot_factory, la
 
 
 @pytest.mark.parametrize("language", ["ru", "en"])
-def test_cite_labels_unverified_corpus_and_never_generates_fallback(bot_factory, monkeypatch, language):
+def test_cite_uses_writer_name_without_notice_and_never_generates_fallback(bot_factory, monkeypatch, language):
     bot = bot_factory(language)
     bot.client = MagicMock()
+    monkeypatch.setattr("writer_bot.random.choice", lambda items: items[0])
     quote, writer = bot.cite()
     assert quote
-    assert "не проверены" in writer or "unverified" in writer
+    assert "не проверены" not in writer and "unverified" not in writer
+    monkeypatch.setattr("writer_bot.json.load", lambda file: [{"quote": "Цитата" if language == "ru" else "Quote", "writer": "Author"}])
+    assert bot.cite()[1] == "Author"
     monkeypatch.setattr(Path, "exists", lambda self: False)
-    monkeypatch.setattr("writer_bot.t", lambda *args, **kwargs: None)
+    monkeypatch.setitem(WriterBot.cite.__globals__, "t", lambda *args, **kwargs: [{"quote": "Quote", "writer": "Author"}])
+    assert bot.cite() == ("Quote", "Author")
+    monkeypatch.setitem(WriterBot.cite.__globals__, "t", lambda *args, **kwargs: None)
     quote, writer = bot.cite()
     assert quote and writer
     bot.client.chat.completions.create.assert_not_called()
